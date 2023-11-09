@@ -1,0 +1,115 @@
+From FEDORA_PATCHES Mon Sep 17 00:00:00 2001
+From: Simon Marchi <simon.marchi@polymtl.ca>
+Date: Tue, 23 Oct 2018 17:00:33 -0400
+Subject: gdb-rhbz2015131-avoid-sigttou-forks-2of2.patch
+
+;; Avoid GDB SIGTTOU on catch exec + set follow-exec-mode new (PR 23368)
+;; (Simon Marchi, related to RHBZ 2015131)
+
+Here's a summary of PR 23368:
+
+  #include <unistd.h>
+  int main (void)
+  {
+    char *exec_args[] = { "/bin/ls", NULL };
+    execve (exec_args[0], exec_args, NULL);
+  }
+
+$ gdb -nx t -ex "catch exec" -ex "set follow-exec-mode new" -ex run
+...
+[1]  + 13146 suspended (tty output)  gdb -q -nx t -ex "catch exec" -ex "set follow-exec-mode new" -ex run
+$
+
+Here's what happens: when the inferior execs with "follow-exec-mode
+new", we first "mourn" it before creating the new one.  This ends up
+calling inflow_inferior_exit, which sets the per-inferior terminal state
+to "is_ours":
+
+  inf->terminal_state = target_terminal_state::is_ours;
+
+At this point, the inferior's terminal_state is is_ours, while the
+"reality", tracked by gdb_tty_state, is is_inferior (GDB doesn't own the
+terminal).
+
+Later, we continue processing the exec inferior event and decide we want
+to stop (because of the "catch exec") and call target_terminal::ours to
+make sure we own the terminal.  However, we don't actually go to the
+target backend to change the settings, because the core thinks that no
+inferior owns the terminal (inf->terminal_state is
+target_terminal_state::is_ours, as checked in
+target_terminal_is_ours_kind, for both inferiors).  When something in
+readline tries to mess with the terminal settings, it generates a
+SIGTTOU.
+
+This patch fixes this by tranferring the state of the terminal from the
+old inferior to the new inferior.
+
+gdb/ChangeLog:
+
+	PR gdb/23368
+	* infrun.c (follow_exec): In the follow_exec_mode_new case,
+	transfer terminal state from old new new inferior.
+	* terminal.h (swap_terminal_info): New function.
+	* inflow.c (swap_terminal_info): New function.
+
+diff --git a/gdb/inflow.c b/gdb/inflow.c
+--- a/gdb/inflow.c
++++ b/gdb/inflow.c
+@@ -671,6 +671,22 @@ copy_terminal_info (struct inferior *to, struct inferior *from)
+   to->terminal_state = from->terminal_state;
+ }
+ 
++/* See terminal.h.  */
++
++void
++swap_terminal_info (inferior *a, inferior *b)
++{
++  terminal_info *info_a
++    = (terminal_info *) inferior_data (a, inflow_inferior_data);
++  terminal_info *info_b
++    = (terminal_info *) inferior_data (a, inflow_inferior_data);
++
++  set_inferior_data (a, inflow_inferior_data, info_b);
++  set_inferior_data (b, inflow_inferior_data, info_a);
++
++  std::swap (a->terminal_state, b->terminal_state);
++}
++
+ void
+ info_terminal_command (const char *arg, int from_tty)
+ {
+diff --git a/gdb/infrun.c b/gdb/infrun.c
+--- a/gdb/infrun.c
++++ b/gdb/infrun.c
+@@ -1197,12 +1197,14 @@ follow_exec (ptid_t ptid, char *exec_file_target)
+       /* The user wants to keep the old inferior and program spaces
+ 	 around.  Create a new fresh one, and switch to it.  */
+ 
+-      /* Do exit processing for the original inferior before adding
+-	 the new inferior so we don't have two active inferiors with
+-	 the same ptid, which can confuse find_inferior_ptid.  */
++      /* Do exit processing for the original inferior before setting the new
++	 inferior's pid.  Having two inferiors with the same pid would confuse
++	 find_inferior_p(t)id.  Transfer the terminal state and info from the
++	  old to the new inferior.  */
++      inf = add_inferior_with_spaces ();
++      swap_terminal_info (inf, current_inferior ());
+       exit_inferior_silent (current_inferior ());
+ 
+-      inf = add_inferior_with_spaces ();
+       inf->pid = pid;
+       target_follow_exec (inf, exec_file_target);
+ 
+diff --git a/gdb/terminal.h b/gdb/terminal.h
+--- a/gdb/terminal.h
++++ b/gdb/terminal.h
+@@ -29,6 +29,9 @@ extern void new_tty_postfork (void);
+ 
+ extern void copy_terminal_info (struct inferior *to, struct inferior *from);
+ 
++/* Exchange the terminal info and state between inferiors A and B.  */
++extern void swap_terminal_info (inferior *a, inferior *b);
++
+ extern pid_t create_tty_session (void);
+ 
+ /* Set up a serial structure describing standard input.  In inflow.c.  */
