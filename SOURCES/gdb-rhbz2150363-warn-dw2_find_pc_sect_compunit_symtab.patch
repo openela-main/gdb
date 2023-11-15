@@ -1,0 +1,40 @@
+From FEDORA_PATCHES Mon Sep 17 00:00:00 2001
+From: Keith Seitz <keiths@redhat.com>
+Date: Mon, 27 Mar 2023 16:05:48 -0400
+Subject: gdb-rhbz2150363-warn-dw2_find_pc_sect_compunit_symtab.patch
+
+;; Change assertion to warning in dw2_find_pc_sect_compunit_symtab
+;; Based on "Fix crash in new DWARF indexer"
+;; (Tom Tromey, RHBZ 2150363)
+
+The assertion:
+
+../../gdb/dwarf2read.c:5272: internal-error: compunit_symtab* dw2_find_pc_sect_compunit_symtab(objfile*, bound_minimal_symbol, CORE_ADDR, obj_section*, int): Assertion `result != NULL' failed.
+
+was removed with the "Fix crash in new DWARF indexer" patch. Backport
+this assertion removal from this patch.
+
+diff --git a/gdb/dwarf2read.c b/gdb/dwarf2read.c
+--- a/gdb/dwarf2read.c
++++ b/gdb/dwarf2read.c
+@@ -5261,15 +5261,15 @@ dw2_find_pc_sect_compunit_symtab (struct objfile *objfile,
+   if (!data)
+     return NULL;
+ 
+-  if (warn_if_readin && data->v.quick->compunit_symtab)
+-    warning (_("(Internal error: pc %s in read in CU, but not in symtab.)"),
+-	     paddress (get_objfile_arch (objfile), pc));
+-
+   result
+     = recursively_find_pc_sect_compunit_symtab (dw2_instantiate_symtab (data,
+ 									false),
+ 						pc);
+-  gdb_assert (result != NULL);
++
++  if (warn_if_readin && result == nullptr)
++    warning (_("(Internal error: pc %s in read in CU, but not in symtab.)"),
++	     paddress (get_objfile_arch (objfile), pc));
++
+   return result;
+ }
+ 
