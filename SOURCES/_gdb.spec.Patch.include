@@ -463,3 +463,19 @@ Patch111: gdb-rhbz1870017-p10-plt-prologue-skipping.patch
 # (Simon Marchi, RHBZ 2086761)
 Patch112: gdb-rhbz2086761-unknown-cfa-rule.patch
 
+# Backport "Fix assertion failure in copy_type"
+# (Tom Tromey, RHBZ2155439)
+Patch113: gdb-rhbz2155439-assert-failure-copy_type.patch
+
+# Backport "[gdb/testsuite] Fix PR20630 regression test in gdb.base/printcmds.exp"
+# (Tom de Vries)
+Patch114: gdb-fix-gdb.base-printcmds-s390x-regressions.patch
+
+# Backport "[gdb/breakpoint] Fix assert in jit_event_handler"
+# (Tom de Vries, RHBZ2130624)
+Patch115: gdb-rhbz-2130624-assert_in_jit_event_handler.patch
+
+# Backport libiberty: prevent buffer overflow when decoding user input
+# (Luís Ferreira, RHBZ2132600)
+Patch116: libiberty-rhbz-2132600-prevent-buffer-overflow.patch
+
