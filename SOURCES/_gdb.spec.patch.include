@@ -198,3 +198,6 @@
 %patch198 -p1
 %patch199 -p1
 %patch200 -p1
+%patch201 -p1
+%patch202 -p1
+%patch203 -p1

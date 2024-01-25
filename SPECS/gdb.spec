@@ -26,7 +26,7 @@ Version:              8.2
 
 # The release always contains a leading reserved number, start it at 1.
 # `upstream' is not a part of `name' to stay fully rpm dependencies compatible for the testing.
-Release:              19%{?dist}
+Release:              20%{?dist}
 
 License:              GPLv3+ and GPLv3+ with exceptions and GPLv2+ and GPLv2+ with exceptions and GPL+ and LGPLv2+ and LGPLv3+ and BSD and Public Domain and GFDL
 Group:                Development/Debuggers
@@ -1062,6 +1062,13 @@ fi
 %endif
 
 %changelog
+* Tue Mar 28 2023 Keith Seitz <keiths@redhat.com> - 8.2-20.el8
+- Backport portion of "Fix crash in new DWARF indexer".
+  (Tom Tromey, RH BZ 2150363)
+- Backport "Fix assertion failure in copy_type" and
+  "Fix PR20630 regression test in gdb.base/printcmds.exp".
+  (Tom Tromey and Tom de Vries, RH BZ 2156888)
+
 * Tue May 24 2022 Keith Seitz <keiths@redhat.com> - 8.2-19.el8
 - Backport "Fix restoring of inferior terminal settings"
 - Backport "Avoid GDB SIGTTOU on catch exec + set follow-exec-mode

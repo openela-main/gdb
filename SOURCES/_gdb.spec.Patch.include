@@ -815,3 +815,16 @@ Patch199: gdb-rhbz2015131-restore-inferior-terminal-1of2.patch
 # (Simon Marchi, related to RHBZ 2015131)
 Patch200: gdb-rhbz2015131-avoid-sigttou-forks-2of2.patch
 
+# Change assertion to warning in dw2_find_pc_sect_compunit_symtab
+# Based on "Fix crash in new DWARF indexer"
+# (Tom Tromey, RHBZ 2150363)
+Patch201: gdb-rhbz2150363-warn-dw2_find_pc_sect_compunit_symtab.patch
+
+# Backport "Fix assertion failure in copy_type"
+# (Tom Tromey, RHBZ 2156888)
+Patch202: gdb-rhbz2156888-copy_type-assertion-1of2.patch
+
+# Backport of "Fix PR20630 regression test in gdb.base/printcmds.exp"
+# (Tom deVries, RHBZ 2156888)
+Patch203: gdb-rhbz2156888-copy_type-assertion-2of2.patch
+
