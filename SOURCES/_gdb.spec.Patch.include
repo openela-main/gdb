@@ -479,3 +479,19 @@ Patch115: gdb-rhbz-2130624-assert_in_jit_event_handler.patch
 # (Luís Ferreira, RHBZ2132600)
 Patch116: libiberty-rhbz-2132600-prevent-buffer-overflow.patch
 
+# Backport "gdbsupport: make gdb_abspath return an std::string"
+# (Simon Marchi)
+Patch117: gdb-find_and_open_source-empty-string-ub-1of4.patch
+
+# Backport "gdbsupport: add path_join function"
+# (Simon Marchi)
+Patch118: gdb-find_and_open_source-empty-string-ub-2of4.patch
+
+# Backport "Fix undefined behaviour dereferencing empty string"
+# (Magne Hov, RHEL-18940)
+Patch119: gdb-find_and_open_source-empty-string-ub-3of4.patch
+
+# Backport "gdbsupport: change path_join parameter to
+# array_view<const char *>"
+# (Simon Marchi)
+Patch120: gdb-find_and_open_source-empty-string-ub-4of4.patch

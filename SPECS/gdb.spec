@@ -37,7 +37,7 @@ Version:              10.2
 
 # The release always contains a leading reserved number, start it at 1.
 # `upstream' is not a part of `name' to stay fully rpm dependencies compatible for the testing.
-Release:              11%{?dist}
+Release:              11.1%{?dist}
 
 License:              GPLv3+ and GPLv3+ with exceptions and GPLv2+ and GPLv2+ with exceptions and GPL+ and LGPLv2+ and LGPLv3+ and BSD and Public Domain and GFDL
 # Do not provide URL for snapshots as the file lasts there only for 2 days.
@@ -1158,6 +1158,10 @@ fi
 %endif
 
 %changelog
+* Mon Jan  8 2024 Keith Seitz - 10.2-11.1.el9
+- Backport patches for "Fix undefined behaviour dereferencing empty string"
+  (Magne Hov et al, RHEL-18940)
+
 * Wed Mar 29 2023 Bruno Larsen <blarsen@redhat.com> - 10.2-11.el9
 - Backport "libiberty: prevent buffer overflow when decoding user input"
   (Luís Ferreira, RHBZ2132600)
@@ -1166,7 +1170,7 @@ fi
 - Backport "[gdb/breakpoint] Fix assert in jit_event_handler"
   (Tom de Vries, RHBZ 2130624)
 
-* Wed Mar 23 2023 Bruno Larsen <blarsen@redhat.com>
+* Thu Mar 23 2023 Bruno Larsen <blarsen@redhat.com>
 - Bakport "Fix assertion failure in copy_type"
   (Tom Tromey, RHBZ 2155439)
 - Bakport "[gdb/testsuite] Fix PR20630 regression test in gdb.base/printcmds.exp"
