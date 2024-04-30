@@ -37,7 +37,7 @@ Version:              10.2
 
 # The release always contains a leading reserved number, start it at 1.
 # `upstream' is not a part of `name' to stay fully rpm dependencies compatible for the testing.
-Release:              11.1%{?dist}
+Release:              13%{?dist}
 
 License:              GPLv3+ and GPLv3+ with exceptions and GPLv2+ and GPLv2+ with exceptions and GPL+ and LGPLv2+ and LGPLv3+ and BSD and Public Domain and GFDL
 # Do not provide URL for snapshots as the file lasts there only for 2 days.
@@ -1158,9 +1158,21 @@ fi
 %endif
 
 %changelog
-* Mon Jan  8 2024 Keith Seitz - 10.2-11.1.el9
+* Wed Dec 13 2023 Keith Seitz - 10.2-13.el9
 - Backport patches for "Fix undefined behaviour dereferencing empty string"
-  (Magne Hov et al, RHEL-18940)
+  (Magne Hov et al, RHEL-17631)
+
+* Tue Oct  3 2023 Guinevere Larsen <blarsen@redhat.com> - 10.2-12.el9
+- Backport "libiberty: Fix infinite recursion in rust demangler."
+  (Nick Clifton)
+- Backport Add a recursion limit to the demangle_const function in the Rust demangler.
+  (Nick Clifton, RHEL-4234)
+- Backport Fix typo in recent code to add stack recursion limit to the Rust demangler.
+  (Nick Clifton)
+
+* Tue Oct  3 2023 Guinevere Larsen <blarsen@redhat.com>
+- Backport "Fix crash in Fortran code"
+  (Tom Tromey, RHEL-7328)
 
 * Wed Mar 29 2023 Bruno Larsen <blarsen@redhat.com> - 10.2-11.el9
 - Backport "libiberty: prevent buffer overflow when decoding user input"

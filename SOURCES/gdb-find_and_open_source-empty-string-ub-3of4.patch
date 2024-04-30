@@ -4,7 +4,7 @@ Date: Tue, 5 Dec 2023 08:47:16 -0800
 Subject: gdb-find_and_open_source-empty-string-ub-3of4.patch
 
 ;; Backport "Fix undefined behaviour dereferencing empty string"
-;; (Magne Hov, RHEL-18940)
+;; (Magne Hov, RHEL-17631)
 
 When a source file's dirname is solely made up of directory separators
 we end up trying to dereference the last character of an empty string

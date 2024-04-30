@@ -479,19 +479,36 @@ Patch115: gdb-rhbz-2130624-assert_in_jit_event_handler.patch
 # (Luís Ferreira, RHBZ2132600)
 Patch116: libiberty-rhbz-2132600-prevent-buffer-overflow.patch
 
+# Backport: Fix crash in Fortran code
+# (Tom Tromey, RHEL-7328)
+Patch117: gdb-rhel-7328-fix-fortran-28801.patch
+
+# Backport "libiberty: Fix infinite recursion in rust demangler."
+# (Nick Clifton)
+Patch118: libiberty-infinite-recursion-fix-1-of-3.patch
+
+# Backport Add a recursion limit to the demangle_const function in the Rust demangler.
+# (Nick Clifton, RHEL-4234)
+Patch119: libiberty-infinite-recursion-fix-2-of-3.patch
+
+# Backport Fix typo in recent code to add stack recursion limit to the Rust demangler.
+# (Nick Clifton)
+Patch120: libiberty-infinite-recursion-fix-3-of-3.patch
+
 # Backport "gdbsupport: make gdb_abspath return an std::string"
 # (Simon Marchi)
-Patch117: gdb-find_and_open_source-empty-string-ub-1of4.patch
+Patch121: gdb-find_and_open_source-empty-string-ub-1of4.patch
 
 # Backport "gdbsupport: add path_join function"
 # (Simon Marchi)
-Patch118: gdb-find_and_open_source-empty-string-ub-2of4.patch
+Patch122: gdb-find_and_open_source-empty-string-ub-2of4.patch
 
 # Backport "Fix undefined behaviour dereferencing empty string"
-# (Magne Hov, RHEL-18940)
-Patch119: gdb-find_and_open_source-empty-string-ub-3of4.patch
+# (Magne Hov, RHEL-17631)
+Patch123: gdb-find_and_open_source-empty-string-ub-3of4.patch
 
 # Backport "gdbsupport: change path_join parameter to
 # array_view<const char *>"
 # (Simon Marchi)
-Patch120: gdb-find_and_open_source-empty-string-ub-4of4.patch
+Patch124: gdb-find_and_open_source-empty-string-ub-4of4.patch
+
