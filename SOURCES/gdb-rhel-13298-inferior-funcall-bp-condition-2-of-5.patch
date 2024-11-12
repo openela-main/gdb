@@ -1,0 +1,1274 @@
+From FEDORA_PATCHES Mon Sep 17 00:00:00 2001
+From: Andrew Burgess <aburgess@redhat.com>
+Date: Fri, 9 Oct 2020 13:27:13 +0200
+Subject: gdb-rhel-13298-inferior-funcall-bp-condition-2-of-5.patch
+
+;;gdb: fix b/p conditions with infcalls in multi-threaded inferiors
+;;(Andrew Burgess, RHEL-13298)
+
+This commit fixes bug PR 28942, that is, creating a conditional
+breakpoint in a multi-threaded inferior, where the breakpoint
+condition includes an inferior function call.
+
+Currently, when a user tries to create such a breakpoint, then GDB
+will fail with:
+
+  (gdb) break infcall-from-bp-cond-single.c:61 if (return_true ())
+  Breakpoint 2 at 0x4011fa: file /tmp/build/gdb/testsuite/../../../src/gdb/testsuite/gdb.threads/infcall-from-bp-cond-single.c, line 61.
+  (gdb) continue
+  Continuing.
+  [New Thread 0x7ffff7c5d700 (LWP 2460150)]
+  [New Thread 0x7ffff745c700 (LWP 2460151)]
+  [New Thread 0x7ffff6c5b700 (LWP 2460152)]
+  [New Thread 0x7ffff645a700 (LWP 2460153)]
+  [New Thread 0x7ffff5c59700 (LWP 2460154)]
+  Error in testing breakpoint condition:
+  Couldn't get registers: No such process.
+  An error occurred while in a function called from GDB.
+  Evaluation of the expression containing the function
+  (return_true) will be abandoned.
+  When the function is done executing, GDB will silently stop.
+  Selected thread is running.
+  (gdb)
+
+Or, in some cases, like this:
+
+  (gdb) break infcall-from-bp-cond-simple.c:56 if (is_matching_tid (arg, 1))
+  Breakpoint 2 at 0x401194: file /tmp/build/gdb/testsuite/../../../src/gdb/testsuite/gdb.threads/infcall-from-bp-cond-simple.c, line 56.
+  (gdb) continue
+  Continuing.
+  [New Thread 0x7ffff7c5d700 (LWP 2461106)]
+  [New Thread 0x7ffff745c700 (LWP 2461107)]
+  ../../src.release/gdb/nat/x86-linux-dregs.c:146: internal-error: x86_linux_update_debug_registers: Assertion `lwp_is_stopped (lwp)' failed.
+  A problem internal to GDB has been detected,
+  further debugging may prove unreliable.
+
+The precise error depends on the exact thread state; so there's race
+conditions depending on which threads have fully started, and which
+have not.  But the underlying problem is always the same; when GDB
+tries to execute the inferior function call from within the breakpoint
+condition, GDB will, incorrectly, try to resume threads that are
+already running - GDB doesn't realise that some threads might already
+be running.
+
+The solution proposed in this patch requires an additional member
+variable thread_info::in_cond_eval.  This flag is set to true (in
+breakpoint.c) when GDB is evaluating a breakpoint condition.
+
+In user_visible_resume_ptid (infrun.c), when the in_cond_eval flag is
+true, then GDB will only try to resume the current thread, that is,
+the thread for which the breakpoint condition is being evaluated.
+This solves the problem of GDB trying to resume threads that are
+already running.
+
+The next problem is that inferior function calls are assumed to be
+synchronous, that is, GDB doesn't expect to start an inferior function
+call in thread #1, then receive a stop from thread #2 for some other,
+unrelated reason.  To prevent GDB responding to an event from another
+thread, we update fetch_inferior_event and do_target_wait in infrun.c,
+so that, when an inferior function call (on behalf of a breakpoint
+condition) is in progress, we only wait for events from the current
+thread (the one evaluating the condition).
+
+In do_target_wait I had to change the inferior_matches lambda
+function, which is used to select which inferior to wait on.
+Previously the logic was this:
+
+   auto inferior_matches = [&wait_ptid] (inferior *inf)
+     {
+       return (inf->process_target () != nullptr
+               && ptid_t (inf->pid).matches (wait_ptid));
+     };
+
+This compares the pid of the inferior against the complete ptid we
+want to wait on.  Before this commit wait_ptid was only ever
+minus_one_ptid (which is special, and means any process), and so every
+inferior would match.
+
+After this commit though wait_ptid might represent a specific thread
+in a specific inferior.  If we compare the pid of the inferior to a
+specific ptid then these will not match.  The fix is to compare
+against the pid extracted from the wait_ptid, not against the complete
+wait_ptid itself.
+
+In fetch_inferior_event, after receiving the event, we only want to
+stop all the other threads, and call inferior_event_handler with
+INF_EXEC_COMPLETE, if we are not evaluating a conditional breakpoint.
+If we are, then all the other threads should be left doing whatever
+they were before.  The inferior_event_handler call will be performed
+once the breakpoint condition has finished being evaluated, and GDB
+decides to stop or not.
+
+The final problem that needs solving relates to GDB's commit-resume
+mechanism, which allows GDB to collect resume requests into a single
+packet in order to reduce traffic to a remote target.
+
+The problem is that the commit-resume mechanism will not send any
+resume requests for an inferior if there are already events pending on
+the GDB side.
+
+Imagine an inferior with two threads.  Both threads hit a breakpoint,
+maybe the same conditional breakpoint.  At this point there are two
+pending events, one for each thread.
+
+GDB selects one of the events and spots that this is a conditional
+breakpoint, GDB evaluates the condition.
+
+The condition includes an inferior function call, so GDB sets up for
+the call and resumes the one thread, the resume request is added to
+the commit-resume queue.
+
+When the commit-resume queue is committed GDB sees that there is a
+pending event from another thread, and so doesn't send any resume
+requests to the actual target, GDB is assuming that when we wait we
+will select the event from the other thread.
+
+However, as this is an inferior function call for a condition
+evaluation, we will not select the event from the other thread, we
+only care about events from the thread that is evaluating the
+condition - and the resume for this thread was never sent to the
+target.
+
+And so, GDB hangs, waiting for an event from a thread that was never
+fully resumed.
+
+To fix this issue I have added the concept of "forcing" the
+commit-resume queue.  When enabling commit resume, if the force flag
+is true, then any resumes will be committed to the target, even if
+there are other threads with pending events.
+
+A note on authorship: this patch was based on some work done by
+Natalia Saiapova and Tankut Baris Aktemur from Intel[1].  I have made
+some changes to their work in this version.
+
+Bug: https://sourceware.org/bugzilla/show_bug.cgi?id=28942
+
+[1] https://sourceware.org/pipermail/gdb-patches/2020-October/172454.html
+
+Co-authored-by: Natalia Saiapova <natalia.saiapova@intel.com>
+Co-authored-by: Tankut Baris Aktemur <tankut.baris.aktemur@intel.com>
+Reviewed-By: Tankut Baris Aktemur <tankut.baris.aktemur@intel.com>
+Tested-By: Luis Machado <luis.machado@arm.com>
+Tested-By: Keith Seitz <keiths@redhat.com>
+
+diff --git a/gdb/breakpoint.c b/gdb/breakpoint.c
+--- a/gdb/breakpoint.c
++++ b/gdb/breakpoint.c
+@@ -5679,6 +5679,8 @@ bpstat_check_breakpoint_conditions (bpstat *bs, thread_info *thread)
+ 	{
+ 	  try
+ 	    {
++	      scoped_restore reset_in_cond_eval
++		= make_scoped_restore (&thread->control.in_cond_eval, true);
+ 	      condition_result = breakpoint_cond_eval (cond);
+ 	    }
+ 	  catch (const gdb_exception_error &ex)
+diff --git a/gdb/gdbthread.h b/gdb/gdbthread.h
+--- a/gdb/gdbthread.h
++++ b/gdb/gdbthread.h
+@@ -171,6 +171,9 @@ struct thread_control_state
+      command.  This is used to decide whether "set scheduler-locking
+      step" behaves like "on" or "off".  */
+   int stepping_command = 0;
++
++  /* True if the thread is evaluating a BP condition.  */
++  bool in_cond_eval = false;
+ };
+ 
+ /* Inferior thread specific part of `struct infcall_suspend_state'.  */
+diff --git a/gdb/infcall.c b/gdb/infcall.c
+--- a/gdb/infcall.c
++++ b/gdb/infcall.c
+@@ -672,6 +672,12 @@ run_inferior_call (std::unique_ptr<call_thread_fsm> sm,
+ 
+       proceed (real_pc, GDB_SIGNAL_0);
+ 
++      /* Enable commit resume, but pass true for the force flag.  This
++	 ensures any thread we set running in proceed will actually be
++	 committed to the target, even if some other thread in the current
++	 target has a pending event.  */
++      scoped_enable_commit_resumed enable ("infcall", true);
++
+       infrun_debug_show_threads ("non-exited threads after proceed for inferior-call",
+ 				 all_non_exited_threads ());
+ 
+diff --git a/gdb/infrun.c b/gdb/infrun.c
+--- a/gdb/infrun.c
++++ b/gdb/infrun.c
+@@ -2292,6 +2292,14 @@ user_visible_resume_ptid (int step)
+ 	 mode.  */
+       resume_ptid = inferior_ptid;
+     }
++  else if (inferior_ptid != null_ptid
++	   && inferior_thread ()->control.in_cond_eval)
++    {
++      /* The inferior thread is evaluating a BP condition.  Other threads
++	 might be stopped or running and we do not want to change their
++	 state, thus, resume only the current thread.  */
++      resume_ptid = inferior_ptid;
++    }
+   else if (!sched_multi && target_supports_multi_process ())
+     {
+       /* Resume all threads of the current process (and none of other
+@@ -3020,12 +3028,24 @@ schedlock_applies (struct thread_info *tp)
+ 					    execution_direction)));
+ }
+ 
+-/* Set process_stratum_target::COMMIT_RESUMED_STATE in all target
+-   stacks that have threads executing and don't have threads with
+-   pending events.  */
++/* When FORCE_P is false, set process_stratum_target::COMMIT_RESUMED_STATE
++   in all target stacks that have threads executing and don't have threads
++   with pending events.
++
++   When FORCE_P is true, set process_stratum_target::COMMIT_RESUMED_STATE
++   in all target stacks that have threads executing regardless of whether
++   there are pending events or not.
++
++   Passing FORCE_P as false makes sense when GDB is going to wait for
++   events from all threads and will therefore spot the pending events.
++   However, if GDB is only going to wait for events from select threads
++   (i.e. when performing an inferior call) then a pending event on some
++   other thread will not be spotted, and if we fail to commit the resume
++   state for the thread performing the inferior call, then the inferior
++   call will never complete (or even start).  */
+ 
+ static void
+-maybe_set_commit_resumed_all_targets ()
++maybe_set_commit_resumed_all_targets (bool force_p)
+ {
+   scoped_restore_current_thread restore_thread;
+ 
+@@ -3054,7 +3074,7 @@ maybe_set_commit_resumed_all_targets ()
+ 	 status to report, handle it before requiring the target to
+ 	 commit its resumed threads: handling the status might lead to
+ 	 resuming more threads.  */
+-      if (proc_target->has_resumed_with_pending_wait_status ())
++      if (!force_p && proc_target->has_resumed_with_pending_wait_status ())
+ 	{
+ 	  infrun_debug_printf ("not requesting commit-resumed for target %s, a"
+ 			       " thread has a pending waitstatus",
+@@ -3064,7 +3084,7 @@ maybe_set_commit_resumed_all_targets ()
+ 
+       switch_to_inferior_no_thread (inf);
+ 
+-      if (target_has_pending_events ())
++      if (!force_p && target_has_pending_events ())
+ 	{
+ 	  infrun_debug_printf ("not requesting commit-resumed for target %s, "
+ 			       "target has pending events",
+@@ -3157,7 +3177,7 @@ scoped_disable_commit_resumed::reset ()
+     {
+       /* This is the outermost instance, re-enable
+ 	 COMMIT_RESUMED_STATE on the targets where it's possible.  */
+-      maybe_set_commit_resumed_all_targets ();
++      maybe_set_commit_resumed_all_targets (false);
+     }
+   else
+     {
+@@ -3190,7 +3210,7 @@ scoped_disable_commit_resumed::reset_and_commit ()
+ /* See infrun.h.  */
+ 
+ scoped_enable_commit_resumed::scoped_enable_commit_resumed
+-  (const char *reason)
++  (const char *reason, bool force_p)
+   : m_reason (reason),
+     m_prev_enable_commit_resumed (enable_commit_resumed)
+ {
+@@ -3202,7 +3222,7 @@ scoped_enable_commit_resumed::scoped_enable_commit_resumed
+ 
+       /* Re-enable COMMIT_RESUMED_STATE on the targets where it's
+ 	 possible.  */
+-      maybe_set_commit_resumed_all_targets ();
++      maybe_set_commit_resumed_all_targets (force_p);
+ 
+       maybe_call_commit_resumed_all_targets ();
+     }
+@@ -3957,10 +3977,11 @@ do_target_wait (ptid_t wait_ptid, execution_control_state *ecs,
+      polling the rest of the inferior list starting from that one in a
+      circular fashion until the whole list is polled once.  */
+ 
+-  auto inferior_matches = [&wait_ptid] (inferior *inf)
++  ptid_t wait_ptid_pid {wait_ptid.pid ()};
++  auto inferior_matches = [&wait_ptid_pid] (inferior *inf)
+     {
+       return (inf->process_target () != nullptr
+-	      && ptid_t (inf->pid).matches (wait_ptid));
++	      && ptid_t (inf->pid).matches (wait_ptid_pid));
+     };
+ 
+   /* First see how many matching inferiors we have.  */
+@@ -4429,7 +4450,17 @@ fetch_inferior_event ()
+        the event.  */
+     scoped_disable_commit_resumed disable_commit_resumed ("handling event");
+ 
+-    if (!do_target_wait (minus_one_ptid, &ecs, TARGET_WNOHANG))
++    /* Is the current thread performing an inferior function call as part
++       of a breakpoint condition evaluation?  */
++    bool in_cond_eval = (inferior_ptid != null_ptid
++			 && inferior_thread ()->control.in_cond_eval);
++
++    /* If the thread is in the middle of the condition evaluation, wait for
++       an event from the current thread.  Otherwise, wait for an event from
++       any thread.  */
++    ptid_t waiton_ptid = in_cond_eval ? inferior_ptid : minus_one_ptid;
++
++    if (!do_target_wait (waiton_ptid, &ecs, TARGET_WNOHANG))
+       {
+ 	infrun_debug_printf ("do_target_wait returned no event");
+ 	disable_commit_resumed.reset_and_commit ();
+@@ -4487,7 +4518,12 @@ fetch_inferior_event ()
+ 	    bool should_notify_stop = true;
+ 	    bool proceeded = false;
+ 
+-	    stop_all_threads_if_all_stop_mode ();
++	    /* If the thread that stopped just completed an inferior
++	       function call as part of a condition evaluation, then we
++	       don't want to stop all the other threads.  */
++	    if (ecs.event_thread == nullptr
++		|| !ecs.event_thread->control.in_cond_eval)
++	      stop_all_threads_if_all_stop_mode ();
+ 
+ 	    clean_up_just_stopped_threads_fsms (&ecs);
+ 
+@@ -4514,7 +4550,7 @@ fetch_inferior_event ()
+ 		  proceeded = normal_stop ();
+ 	      }
+ 
+-	    if (!proceeded)
++	    if (!proceeded && !in_cond_eval)
+ 	      {
+ 		inferior_event_handler (INF_EXEC_COMPLETE);
+ 		cmd_done = 1;
+diff --git a/gdb/infrun.h b/gdb/infrun.h
+--- a/gdb/infrun.h
++++ b/gdb/infrun.h
+@@ -406,7 +406,8 @@ extern void maybe_call_commit_resumed_all_targets ();
+ 
+ struct scoped_enable_commit_resumed
+ {
+-  explicit scoped_enable_commit_resumed (const char *reason);
++  explicit scoped_enable_commit_resumed (const char *reason,
++					 bool force_p = false);
+   ~scoped_enable_commit_resumed ();
+ 
+   DISABLE_COPY_AND_ASSIGN (scoped_enable_commit_resumed);
+diff --git a/gdb/testsuite/gdb.threads/infcall-from-bp-cond-other-thread-event.c b/gdb/testsuite/gdb.threads/infcall-from-bp-cond-other-thread-event.c
+new file mode 100644
+--- /dev/null
++++ b/gdb/testsuite/gdb.threads/infcall-from-bp-cond-other-thread-event.c
+@@ -0,0 +1,135 @@
++/* Copyright 2022-2024 Free Software Foundation, Inc.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++#include <pthread.h>
++#include <unistd.h>
++#include <stdlib.h>
++#include <sched.h>
++
++#define NUM_THREADS 2
++
++pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
++
++/* Some global variables to poke, just for something to do.  */
++volatile int global_var_0 = 0;
++volatile int global_var_1 = 0;
++
++/* This flag is updated from GDB.  */
++volatile int raise_signal = 0;
++
++/* Implement the breakpoint condition function.  Release the other thread
++   and try to give the other thread a chance to run.  Then return ANSWER.  */
++int
++condition_core_func (int answer)
++{
++  /* This unlock should release the other thread.  */
++  if (pthread_mutex_unlock (&mutex) != 0)
++    abort ();
++
++  /* And this yield and sleep should (hopefully) give the other thread a
++     chance to run.  This isn't guaranteed of course, but once the other
++     thread does run it should hit a breakpoint, which GDB should
++     (temporarily) ignore, so there's no easy way for us to know the other
++     thread has done what it needs to, thus, yielding and sleeping is the
++     best we can do.  */
++  sched_yield ();
++  sleep (2);
++
++  return answer;
++}
++
++void
++stop_marker ()
++{
++  int a = 100;	/* Final breakpoint here.  */
++}
++
++/* A breakpoint condition function that always returns true.  */
++int
++condition_true_func ()
++{
++  return condition_core_func (1);
++}
++
++/* A breakpoint condition function that always returns false.  */
++int
++condition_false_func ()
++{
++  return condition_core_func (0);
++}
++
++void *
++worker_func (void *arg)
++{
++  volatile int *ptr = 0;
++  int tid = *((int *) arg);
++
++  switch (tid)
++    {
++    case 0:
++      global_var_0 = 11;	/* First thread breakpoint.  */
++      break;
++
++    case 1:
++      if (pthread_mutex_lock (&mutex) != 0)
++	abort ();
++      if (raise_signal)
++	global_var_1 = *ptr;	/* Signal here.  */
++      else
++	global_var_1 = 99;	/* Other thread breakpoint.  */
++      break;
++
++    default:
++      abort ();
++    }
++
++  return NULL;
++}
++
++int
++main ()
++{
++  pthread_t threads[NUM_THREADS];
++  int args[NUM_THREADS];
++
++  /* Set an alarm, just in case the test deadlocks.  */
++  alarm (300);
++
++  /* We want the mutex to start locked.  */
++  if (pthread_mutex_lock (&mutex) != 0)
++    abort ();
++
++  for (int i = 0; i < NUM_THREADS; i++)
++    {
++      args[i] = i;
++      pthread_create (&threads[i], NULL, worker_func, &args[i]);
++    }
++
++  for (int i = 0; i < NUM_THREADS; i++)
++    {
++      void *retval;
++      pthread_join (threads[i], &retval);
++    }
++
++  /* Unlock once we're done, just for cleanliness.  */
++  if (pthread_mutex_unlock (&mutex) != 0)
++    abort ();
++
++  stop_marker ();
++
++  return 0;
++}
+diff --git a/gdb/testsuite/gdb.threads/infcall-from-bp-cond-other-thread-event.exp b/gdb/testsuite/gdb.threads/infcall-from-bp-cond-other-thread-event.exp
+new file mode 100644
+--- /dev/null
++++ b/gdb/testsuite/gdb.threads/infcall-from-bp-cond-other-thread-event.exp
+@@ -0,0 +1,174 @@
++# Copyright 2022-2024 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++# Test for conditional breakpoints where the breakpoint condition includes
++# an inferior function call.
++#
++# The tests in this script are testing what happens when an event arrives in
++# another thread while GDB is waiting for the inferior function call (in the
++# breakpoint condition) to finish.
++#
++# The expectation is that GDB will queue events for other threads and wait
++# for the inferior function call to complete, if the condition is true, then
++# the conditional breakpoint should be reported first.  The other thread
++# event should of course, not get lost, and should be reported as soon as
++# the user tries to continue the inferior.
++#
++# If the conditional breakpoint ends up not being taken (the condition is
++# false), then the other thread event should be reported immediately.
++#
++# This script tests what happens when the other thread event is (a) the
++# other thread hitting a breakpoint, and (b) the other thread taking a
++# signal (SIGSEGV in this case).
++
++standard_testfile
++
++if { [build_executable "failed to prepare" ${binfile} "${srcfile}" \
++	  {debug pthreads}] == -1 } {
++    return
++}
++
++set cond_bp_line [gdb_get_line_number "First thread breakpoint"]
++set other_bp_line [gdb_get_line_number "Other thread breakpoint"]
++set final_bp_line [gdb_get_line_number "Final breakpoint here"]
++set signal_line [gdb_get_line_number "Signal here"]
++
++# Start GDB based on TARGET_ASYNC and TARGET_NON_STOP, and then runto main.
++proc start_gdb_and_runto_main { target_async target_non_stop } {
++    save_vars { ::GDBFLAGS } {
++	append ::GDBFLAGS \
++	    " -ex \"maint set target-non-stop $target_non_stop\""
++	append ::GDBFLAGS \
++	    " -ex \"maintenance set target-async ${target_async}\""
++
++	clean_restart ${::binfile}
++    }
++
++    if { ![runto_main] } {
++	return -1
++    }
++
++    return 0
++}
++
++# Run a test of GDB's conditional breakpoints, where the conditions include
++# inferior function calls.  While the inferior function call is executing
++# another thread will hit a breakpoint (when OTHER_THREAD_SIGNAL is false),
++# or receive a signal (when OTHER_THREAD_SIGNAL is true).  GDB should report
++# the conditional breakpoint first (if the condition is true), and then
++# report the second thread event once the inferior is continued again.
++#
++# When STOP_AT_COND is true then the conditional breakpoint will have a
++# condition that evaluates to true (and GDB will stop at the breakpoint),
++# otherwise, the condition will evaluate to false (and GDB will not stop at
++# the breakpoint).
++proc run_condition_test { stop_at_cond other_thread_signal \
++			      target_async target_non_stop } {
++    if { [start_gdb_and_runto_main $target_async \
++	      $target_non_stop] == -1 } {
++	return
++    }
++
++    # Setup the conditional breakpoint.
++    if { $stop_at_cond } {
++	set cond_func "condition_true_func"
++    } else {
++	set cond_func "condition_false_func"
++    }
++    gdb_breakpoint \
++	"${::srcfile}:${::cond_bp_line} if (${cond_func} ())"
++    set cond_bp_num [get_integer_valueof "\$bpnum" "*UNKNOWN*" \
++			"get number for conditional breakpoint"]
++
++    if { $other_thread_signal } {
++	# Arrange for the other thread to raise a signal while GDB is
++	# evaluating the breakpoint condition.
++	gdb_test_no_output "set raise_signal = 1"
++    } else {
++	# And a breakpoint that will be hit by another thread only once the
++	# breakpoint condition starts to be evaluated.
++	gdb_breakpoint "${::srcfile}:${::other_bp_line}"
++	set other_bp_num [get_integer_valueof "\$bpnum" "*UNKNOWN*" \
++			      "get number for other breakpoint"]
++    }
++
++    # A final breakpoint once the test has completed.
++    gdb_breakpoint "${::srcfile}:${::final_bp_line}"
++    set final_bp_num [get_integer_valueof "\$bpnum" "*UNKNOWN*" \
++			  "get number for final breakpoint"]
++
++    if { $stop_at_cond } {
++	# Continue.  The first breakpoint we hit should be the conditional
++	# breakpoint.  The other thread will have hit its breakpoint, but
++	# that will have been deferred until the conditional breakpoint is
++	# reported.
++	gdb_test "continue" \
++	    [multi_line \
++		 "Continuing\\." \
++		 ".*" \
++		 "" \
++		 "Thread ${::decimal} \"\[^\"\r\n\]+\" hit Breakpoint ${cond_bp_num}, worker_func \[^\r\n\]+:${::cond_bp_line}" \
++		 "${::decimal}\\s+\[^\r\n\]+First thread breakpoint\[^\r\n\]+"] \
++	    "hit the conditional breakpoint"
++    }
++
++    if { $other_thread_signal } {
++	# Now continue again, the other thread will now report that it
++	# received a signal.
++	gdb_test "continue" \
++	    [multi_line \
++		 "Continuing\\." \
++		 ".*" \
++		 "Thread ${::decimal} \"\[^\"\r\n\]+\" received signal SIGSEGV, Segmentation fault\\." \
++		 "\\\[Switching to Thread \[^\r\n\]+\\\]" \
++		 "${::hex} in worker_func \[^\r\n\]+:${::signal_line}" \
++		 "${::decimal}\\s+\[^\r\n\]+Signal here\[^\r\n\]+"] \
++	    "received signal in other thread"
++    } else {
++	# Now continue again, the other thread will now report its
++	# breakpoint.
++	gdb_test "continue" \
++	    [multi_line \
++		 "Continuing\\." \
++		 ".*" \
++		 "" \
++		 "Thread ${::decimal} \"\[^\"\r\n\]+\" hit Breakpoint ${other_bp_num}, worker_func \[^\r\n\]+:${::other_bp_line}" \
++		 "${::decimal}\\s+\[^\r\n\]+Other thread breakpoint\[^\r\n\]+"] \
++	    "hit the breakpoint in other thread"
++
++	# Run to the stop marker.
++	gdb_test "continue" \
++	    [multi_line \
++		 "Continuing\\." \
++		 ".*" \
++		 "" \
++		 "Thread ${::decimal} \"\[^\"\r\n\]+\" hit Breakpoint ${final_bp_num}, stop_marker \[^\r\n\]+:${::final_bp_line}" \
++		 "${::decimal}\\s+\[^\r\n\]+Final breakpoint here\[^\r\n\]+"] \
++	    "hit the final breakpoint"
++    }
++
++    gdb_exit
++}
++
++foreach_with_prefix target_async { "on" "off" } {
++    foreach_with_prefix target_non_stop { "on" "off" } {
++	foreach_with_prefix other_thread_signal { true false } {
++	    foreach_with_prefix stop_at_cond { true false } {
++		run_condition_test $stop_at_cond $other_thread_signal \
++		    $target_async $target_non_stop
++	    }
++	}
++    }
++}
+diff --git a/gdb/testsuite/gdb.threads/infcall-from-bp-cond-simple.c b/gdb/testsuite/gdb.threads/infcall-from-bp-cond-simple.c
+new file mode 100644
+--- /dev/null
++++ b/gdb/testsuite/gdb.threads/infcall-from-bp-cond-simple.c
+@@ -0,0 +1,89 @@
++/* Copyright 2022-2024 Free Software Foundation, Inc.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++#include <pthread.h>
++#include <unistd.h>
++
++#define NUM_THREADS 3
++
++int
++is_matching_tid (int *tid_ptr, int tid_value)
++{
++  return *tid_ptr == tid_value;
++}
++
++int
++return_true ()
++{
++  return 1;
++}
++
++int
++return_false ()
++{
++  return 0;
++}
++
++int
++function_that_segfaults ()
++{
++  int *p = 0;
++  *p = 1;	/* Segfault happens here.   */
++}
++
++int
++function_with_breakpoint ()
++{
++  return 1;	/* Nested breakpoint.  */
++}
++
++void *
++worker_func (void *arg)
++{
++  int a = 42;	/* Breakpoint here.  */
++}
++
++void
++stop_marker ()
++{
++  int b = 99;	/* Stop marker.  */
++}
++
++int
++main ()
++{
++  pthread_t threads[NUM_THREADS];
++  int args[NUM_THREADS];
++
++  alarm (300);
++
++  for (int i = 0; i < NUM_THREADS; i++)
++    {
++      args[i] = i;
++      pthread_create (&threads[i], NULL, worker_func, &args[i]);
++    }
++
++  for (int i = 0; i < NUM_THREADS; i++)
++    {
++      void *retval;
++      pthread_join (threads[i], &retval);
++    }
++
++  stop_marker ();
++
++  return 0;
++}
+diff --git a/gdb/testsuite/gdb.threads/infcall-from-bp-cond-simple.exp b/gdb/testsuite/gdb.threads/infcall-from-bp-cond-simple.exp
+new file mode 100644
+--- /dev/null
++++ b/gdb/testsuite/gdb.threads/infcall-from-bp-cond-simple.exp
+@@ -0,0 +1,235 @@
++# Copyright 2022-2024 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++# Some simple tests of inferior function calls from breakpoint
++# conditions, in multi-threaded inferiors.
++#
++# This test sets up a multi-threaded inferior, and places a breakpoint
++# at a location that many of the threads will reach.  We repeat the
++# test with different conditions, sometimes a single thread should
++# stop at the breakpoint, sometimes multiple threads should stop, and
++# sometimes no threads should stop.
++
++standard_testfile
++
++if { [build_executable "failed to prepare" ${binfile} "${srcfile}" \
++	  {debug pthreads}] == -1 } {
++    return
++}
++
++set cond_bp_line [gdb_get_line_number "Breakpoint here"]
++set stop_bp_line [gdb_get_line_number "Stop marker"]
++set nested_bp_line [gdb_get_line_number "Nested breakpoint"]
++set segv_line [gdb_get_line_number "Segfault happens here"]
++
++# Start GDB based on TARGET_ASYNC and TARGET_NON_STOP, and then runto main.
++proc start_gdb_and_runto_main { target_async target_non_stop } {
++    save_vars { ::GDBFLAGS } {
++	append ::GDBFLAGS \
++	    " -ex \"maint set target-non-stop $target_non_stop\""
++	append ::GDBFLAGS \
++	    " -ex \"maintenance set target-async ${target_async}\""
++
++	clean_restart ${::binfile}
++    }
++
++    if { ![runto_main] } {
++	return -1
++    }
++
++    return 0
++}
++
++# Run a test of GDB's conditional breakpoints, where the conditions include
++# inferior function calls.
++#
++# CONDITION is the expression to be used as the breakpoint condition.
++#
++# N_EXPECTED_HITS is the number of threads that we expect to stop due to
++# CONDITON.
++#
++# MESSAGE is used as a test name prefix.
++proc run_condition_test { message n_expected_hits condition \
++			      target_async target_non_stop } {
++    with_test_prefix $message {
++
++	if { [start_gdb_and_runto_main $target_async \
++		  $target_non_stop] == -1 } {
++	    return
++	}
++
++	# Use this convenience variable to track how often the
++	# breakpoint condition has been evaluated.  This should be
++	# once per thread.
++	gdb_test "set \$n_cond_eval = 0"
++
++	# Setup the conditional breakpoint.
++	gdb_breakpoint \
++	    "${::srcfile}:${::cond_bp_line} if ((++\$n_cond_eval) && (${condition}))"
++
++	# And a breakpoint that we hit when the test is over, this one is
++	# not conditional.  Only the main thread gets here once all the
++	# other threads have finished.
++	gdb_breakpoint "${::srcfile}:${::stop_bp_line}"
++
++	# The number of times we stop at the conditional breakpoint.
++	set n_hit_condition 0
++
++	# Now keep 'continue'-ing GDB until all the threads have finished
++	# and we reach the stop_marker breakpoint.
++	gdb_test_multiple "continue" "spot all breakpoint hits" {
++	    -re " worker_func \[^\r\n\]+${::srcfile}:${::cond_bp_line}\r\n${::decimal}\\s+\[^\r\n\]+Breakpoint here\[^\r\n\]+\r\n${::gdb_prompt} $" {
++		incr n_hit_condition
++		send_gdb "continue\n"
++		exp_continue
++	    }
++
++	    -re " stop_marker \[^\r\n\]+${::srcfile}:${::stop_bp_line}\r\n${::decimal}\\s+\[^\r\n\]+Stop marker\[^\r\n\]+\r\n${::gdb_prompt} $" {
++		pass $gdb_test_name
++	    }
++	}
++
++	gdb_assert { $n_hit_condition == $n_expected_hits } \
++	    "stopped at breakpoint the expected number of times"
++
++	# Ensure the breakpoint condition was evaluated once per thread.
++	gdb_test "print \$n_cond_eval" "= 3" \
++	    "condition was evaluated in each thread"
++    }
++}
++
++# Check that after handling a conditional breakpoint (where the condition
++# includes an inferior call), it is still possible to kill the running
++# inferior, and then restart the inferior.
++#
++# At once point doing this would result in GDB giving an assertion error.
++proc_with_prefix run_kill_and_restart_test { target_async target_non_stop } {
++    # This test relies on the 'start' command, which is not possible with
++    # the plain 'remote' target.
++    if { [target_info gdb_protocol] == "remote" } {
++	return
++    }
++
++    if { [start_gdb_and_runto_main $target_async \
++	      $target_non_stop] == -1 } {
++	return
++    }
++
++    # Setup the conditional breakpoint.
++    gdb_breakpoint \
++	"${::srcfile}:${::cond_bp_line} if (is_matching_tid (arg, 1))"
++    gdb_continue_to_breakpoint "worker_func"
++
++    # Now kill the program being debugged.
++    gdb_test "kill" "" "kill process" \
++	"Kill the program being debugged.*y or n. $" "y"
++
++    # Check we can restart the inferior.  At one point this would trigger an
++    # assertion.
++    gdb_start_cmd
++}
++
++# Create a conditional breakpoint which includes a call to a function that
++# segfaults.  Run GDB and check what happens when the inferior segfaults
++# during the inferior call.
++proc_with_prefix run_bp_cond_segfaults { target_async target_non_stop } {
++    if { [start_gdb_and_runto_main $target_async \
++	      $target_non_stop] == -1 } {
++	return
++    }
++
++    # This test relies on the inferior segfaulting when trying to
++    # access address zero.
++    if { [is_address_zero_readable] } {
++	return
++    }
++
++    # Setup the conditional breakpoint, include a call to
++    # 'function_that_segfaults', which triggers the segfault.
++    gdb_breakpoint \
++	"${::srcfile}:${::cond_bp_line} if (is_matching_tid (arg, 0) && function_that_segfaults ())"
++    set bp_1_num [get_integer_valueof "\$bpnum" "*UNKNOWN*" \
++		      "get number of conditional breakpoint"]
++
++    gdb_test "continue" \
++	[multi_line \
++	     "Continuing\\." \
++	     ".*" \
++	     "Thread ${::decimal} \"infcall-from-bp\" received signal SIGSEGV, Segmentation fault\\." \
++	     "${::hex} in function_that_segfaults \\(\\) at \[^\r\n\]+:${::segv_line}" \
++	     "${::decimal}\\s+\[^\r\n\]+Segfault happens here\[^\r\n\]+" \
++	     "Error in testing condition for breakpoint ${bp_1_num}:" \
++	     "The program being debugged was signaled while in a function called from GDB\\." \
++	     "GDB remains in the frame where the signal was received\\." \
++	     "To change this behavior use \"set unwindonsignal on\"\\." \
++	     "Evaluation of the expression containing the function" \
++	     "\\(function_that_segfaults\\) will be abandoned\\." \
++	     "When the function is done executing, GDB will silently stop\\."]
++}
++
++# Create a conditional breakpoint which includes a call to a function that
++# itself has a breakpoint set within it.  Run GDB and check what happens
++# when GDB hits the nested breakpoint.
++proc_with_prefix run_bp_cond_hits_breakpoint { target_async target_non_stop } {
++    if { [start_gdb_and_runto_main $target_async \
++	      $target_non_stop] == -1 } {
++	return
++    }
++
++    # Setup the conditional breakpoint, include a call to
++    # 'function_with_breakpoint' in which we will shortly place a
++    # breakpoint.
++    gdb_breakpoint \
++	"${::srcfile}:${::cond_bp_line} if (is_matching_tid (arg, 0) && function_with_breakpoint ())"
++    set bp_1_num [get_integer_valueof "\$bpnum" "*UNKNOWN*" \
++		      "get number of conditional breakpoint"]
++
++    gdb_breakpoint "${::srcfile}:${::nested_bp_line}"
++    set bp_2_num [get_integer_valueof "\$bpnum" "*UNKNOWN*" \
++		      "get number of nested breakpoint"]
++
++    gdb_test "continue" \
++	[multi_line \
++	     "Continuing\\." \
++	     ".*" \
++	     "Thread ${::decimal} \"infcall-from-bp\" hit Breakpoint ${bp_2_num}, function_with_breakpoint \\(\\) at \[^\r\n\]+:${::nested_bp_line}" \
++	     "${::decimal}\\s+\[^\r\n\]+Nested breakpoint\[^\r\n\]+" \
++	     "Error in testing condition for breakpoint ${bp_1_num}:" \
++	     "The program being debugged stopped while in a function called from GDB\\." \
++	     "Evaluation of the expression containing the function" \
++	     "\\(function_with_breakpoint\\) will be abandoned\\." \
++	     "When the function is done executing, GDB will silently stop\\."]
++}
++
++foreach_with_prefix target_async { "on" "off" } {
++    foreach_with_prefix target_non_stop { "on" "off" } {
++	run_condition_test "exactly one thread is hit" \
++	    1 "is_matching_tid (arg, 1)" \
++	    $target_async $target_non_stop
++	run_condition_test "exactly two threads are hit" \
++	    2 "(is_matching_tid (arg, 0) || is_matching_tid (arg, 2))" \
++	    $target_async $target_non_stop
++	run_condition_test "all three threads are hit" \
++	    3 "return_true ()" \
++	    $target_async $target_non_stop
++	run_condition_test "no thread is hit" \
++	    0 "return_false ()" \
++	    $target_async $target_non_stop
++
++	run_kill_and_restart_test $target_async $target_non_stop
++	run_bp_cond_segfaults $target_async $target_non_stop
++	run_bp_cond_hits_breakpoint $target_async $target_non_stop
++    }
++}
+diff --git a/gdb/testsuite/gdb.threads/infcall-from-bp-cond-single.c b/gdb/testsuite/gdb.threads/infcall-from-bp-cond-single.c
+new file mode 100644
+--- /dev/null
++++ b/gdb/testsuite/gdb.threads/infcall-from-bp-cond-single.c
+@@ -0,0 +1,139 @@
++/* Copyright 2022-2024 Free Software Foundation, Inc.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++#include <pthread.h>
++#include <unistd.h>
++#include <semaphore.h>
++#include <stdlib.h>
++
++#define NUM_THREADS 5
++
++/* Semaphores, used to track when threads have started, and to control
++   when the threads finish.  */
++sem_t startup_semaphore;
++sem_t finish_semaphore;
++
++/* Mutex to control when the first worker thread hit a breakpoint
++   location.  */
++pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
++
++/* Global variable to poke, just so threads have something to do.  */
++volatile int global_var = 0;
++
++int
++return_true ()
++{
++  return 1;
++}
++
++int
++return_false ()
++{
++  return 0;
++}
++
++void *
++worker_func (void *arg)
++{
++  int tid = *((int *) arg);
++
++  switch (tid)
++    {
++    case 0:
++      /* Wait for MUTEX to become available, then pass through the
++	 conditional breakpoint location.  */
++      if (pthread_mutex_lock (&mutex) != 0)
++	abort ();
++      global_var = 99;	/* Conditional breakpoint here.  */
++      if (pthread_mutex_unlock (&mutex) != 0)
++	abort ();
++      break;
++
++    default:
++      /* Notify the main thread that the thread has started, then wait for
++	 the main thread to tell us to finish.  */
++      sem_post (&startup_semaphore);
++      if (sem_wait (&finish_semaphore) != 0)
++	abort ();
++      break;
++    }
++}
++
++void
++stop_marker ()
++{
++  global_var = 99;	/* Stop marker.  */
++}
++
++int
++main ()
++{
++  pthread_t threads[NUM_THREADS];
++  int args[NUM_THREADS];
++  void *retval;
++
++  /* An alarm, just in case the thread deadlocks.  */
++  alarm (300);
++
++  /* Semaphore initialization.  */
++  if (sem_init (&startup_semaphore, 0, 0) != 0)
++    abort ();
++  if (sem_init (&finish_semaphore, 0, 0) != 0)
++    abort ();
++
++  /* Lock MUTEX, this prevents the first worker thread from rushing ahead.  */
++  if (pthread_mutex_lock (&mutex) != 0)
++    abort ();
++
++  /* Worker thread creation.  */
++  for (int i = 0; i < NUM_THREADS; i++)
++    {
++      args[i] = i;
++      pthread_create (&threads[i], NULL, worker_func, &args[i]);
++    }
++
++  /* Wait for every thread (other than the first) to tell us it has started
++     up.  */
++  for (int i = 1; i < NUM_THREADS; i++)
++    {
++      if (sem_wait (&startup_semaphore) != 0)
++	abort ();
++    }
++
++  /* Unlock the first thread so it can proceed.  */
++  if (pthread_mutex_unlock (&mutex) != 0)
++    abort ();
++
++  /* Wait for the first thread only.  */
++  pthread_join (threads[0], &retval);
++
++  /* Now post FINISH_SEMAPHORE to allow all the other threads to finish.  */
++  for (int i = 1; i < NUM_THREADS; i++)
++    sem_post (&finish_semaphore);
++
++  /* Now wait for the remaining threads to complete.  */
++  for (int i = 1; i < NUM_THREADS; i++)
++    pthread_join (threads[i], &retval);
++
++  /* Semaphore cleanup.  */
++  sem_destroy (&finish_semaphore);
++  sem_destroy (&startup_semaphore);
++
++  stop_marker ();
++
++  return 0;
++}
+diff --git a/gdb/testsuite/gdb.threads/infcall-from-bp-cond-single.exp b/gdb/testsuite/gdb.threads/infcall-from-bp-cond-single.exp
+new file mode 100644
+--- /dev/null
++++ b/gdb/testsuite/gdb.threads/infcall-from-bp-cond-single.exp
+@@ -0,0 +1,117 @@
++# Copyright 2022-2024 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++# This test reprocuces bug gdb/28942, performing an inferior function
++# call from a breakpoint condition in a multi-threaded inferior.
++#
++# The important part of this test is that, when the conditional
++# breakpoint is hit, and the condition (which includes an inferior
++# function call) is evaluated, the other threads are running.
++
++standard_testfile
++
++if { [build_executable "failed to prepare" ${binfile} "${srcfile}" \
++	  {debug pthreads}] == -1 } {
++    return
++}
++
++set cond_bp_line [gdb_get_line_number "Conditional breakpoint here"]
++set final_bp_line [gdb_get_line_number "Stop marker"]
++
++# Start GDB based on TARGET_ASYNC and TARGET_NON_STOP, and then runto main.
++proc start_gdb_and_runto_main { target_async target_non_stop } {
++    save_vars { ::GDBFLAGS } {
++	append ::GDBFLAGS \
++	    " -ex \"maint set target-non-stop $target_non_stop\""
++	append ::GDBFLAGS \
++	    " -ex \"maintenance set target-async ${target_async}\""
++
++	clean_restart ${::binfile}
++    }
++
++    if { ![runto_main] } {
++	return -1
++    }
++
++    return 0
++}
++
++# Run a test of GDB's conditional breakpoints, where the conditions include
++# inferior function calls.
++#
++# TARGET_ASYNC and TARGET_NON_STOP are used when starting up GDB.
++#
++# When STOP_AT_COND is true the breakpoint condtion will evaluate to
++# true, and GDB will stop at the breakpoint.  Otherwise, the
++# breakpoint condition will evaluate to false and GDB will not stop at
++# the breakpoint.
++proc run_condition_test { stop_at_cond \
++			      target_async target_non_stop } {
++    if { [start_gdb_and_runto_main $target_async \
++	      $target_non_stop] == -1 } {
++	return
++    }
++
++    # Setup the conditional breakpoint.
++    if { $stop_at_cond } {
++	set cond_func "return_true"
++    } else {
++	set cond_func "return_false"
++    }
++    gdb_breakpoint \
++	"${::srcfile}:${::cond_bp_line} if (${cond_func} ())"
++    set cond_bp_num [get_integer_valueof "\$bpnum" "*UNKNOWN*" \
++			"get number for conditional breakpoint"]
++
++    # And a breakpoint that we hit when the test is over, this one is
++    # not conditional.
++    gdb_breakpoint "${::srcfile}:${::final_bp_line}"
++    set final_bp_num [get_integer_valueof "\$bpnum" "*UNKNOWN*" \
++			  "get number for final breakpoint"]
++
++    if { $stop_at_cond } {
++	# Continue.  The first breakpoint we hit should be the conditional
++	# breakpoint.  The other thread will have hit its breakpoint, but
++	# that will have been deferred until the conditional breakpoint is
++	# reported.
++	gdb_test "continue" \
++	    [multi_line \
++		 "Continuing\\." \
++		 ".*" \
++		 "" \
++		 "Thread ${::decimal} \"\[^\"\r\n\]+\" hit Breakpoint ${cond_bp_num}, worker_func \[^\r\n\]+:${::cond_bp_line}" \
++		 "${::decimal}\\s+\[^\r\n\]+Conditional breakpoint here\[^\r\n\]+"] \
++	    "hit the conditional breakpoint"
++    }
++
++    # Run to the stop marker.
++    gdb_test "continue" \
++	[multi_line \
++	     "Continuing\\." \
++	     ".*" \
++	     "" \
++	     "Thread ${::decimal} \"\[^\"\r\n\]+\" hit Breakpoint ${final_bp_num}, stop_marker \[^\r\n\]+:${::final_bp_line}" \
++	     "${::decimal}\\s+\[^\r\n\]+Stop marker\[^\r\n\]+"] \
++	"hit the final breakpoint"
++}
++
++foreach_with_prefix target_async { "on" "off" } {
++    foreach_with_prefix target_non_stop { "on" "off" } {
++	foreach_with_prefix stop_at_cond { true false } {
++	    run_condition_test $stop_at_cond \
++		$target_async $target_non_stop
++	}
++    }
++}

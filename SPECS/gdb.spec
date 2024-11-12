@@ -6,12 +6,25 @@
 # --with profile: gcc -fprofile-generate / -fprofile-use: Before better
 #                 workload gets run it decreases the general performance now.
 # --define 'scl somepkgname': Independent packages by scl-utils-build.
+# --define 'tests "TEST1 ... TESTN": Limit testing to specified tests.
 
 # Turn off the brp-python-bytecompile automagic
 %global _python_bytecompile_extra 0
 
 # Disable LTO until upstream fixes GDB's ODR woes.
-#%define _lto_cflags %{nil}
+%define _lto_cflags %{nil}
+
+# Only build on x86 for RHEL6 SCL, defining missing parallel make macros.
+%if 0%{?scl:1} && 0%{?el6:1}
+ExclusiveArch:        %{ix86} x86_64
+%global make_build make %{?_smp_mflags}
+%global make_install make %{?_smp_mflags} install DESTDIR=$RPM_BUILD_ROOT
+%endif
+
+# Exclude aarch64 on RHEL7.
+%if 0%{?scl:1} && 0%{?el7:1}
+ExcludeArch:          aarch64
+%endif
 
 %{?scl:%scl_package gdb}
 %{!?scl:
@@ -22,24 +35,31 @@
 }
 
 # If we're on Fedora or RHEL 9+, we will build the gdb-minimal package.
-%if 0%{?fedora} || 0%{?rhel} > 8
+# Never build the -minimal package on SCLs, since it's unneeded there.
+%if 0%{?fedora} || (0%{?rhel} > 8 && 0%{!?scl:1})
 %global _build_minimal 1
+%endif
+
+# Include support for Guile? This is enabled on RHEL 8 and
+# Fedora < 38.
+%if (0%{?fedora:1} && 0%{?fedora} < 38) || (0%{?rhel:1} && 0%{?rhel} == 8)
+%define use_guile 1
 %endif
 
 Name:                 %{?scl_prefix}gdb
 
 # Freeze it when GDB gets branched
-%global snapsrc    20200208
+%global snapsrc    20220501
 # See timestamp of source gnulib installed into gnulib/ .
-%global snapgnulib 20200630
+%global snapgnulib 20220501
 %global tarname gdb-%{version}
-Version:              10.2
+Version:              14.2
 
 # The release always contains a leading reserved number, start it at 1.
 # `upstream' is not a part of `name' to stay fully rpm dependencies compatible for the testing.
-Release:              13%{?dist}
+Release:              3%{?dist}
 
-License:              GPLv3+ and GPLv3+ with exceptions and GPLv2+ and GPLv2+ with exceptions and GPL+ and LGPLv2+ and LGPLv3+ and BSD and Public Domain and GFDL
+License:              GPL-3.0-or-later AND BSD-3-Clause AND FSFAP AND LGPL-2.1-or-later AND GPL-2.0-or-later AND LGPL-2.0-or-later AND LicenseRef-Fedora-Public-Domain AND GFDL-1.3-or-later AND LGPL-2.0-or-later WITH GCC-exception-2.0 AND GPL-3.0-or-later WITH GCC-exception-3.1 AND GPL-2.0-or-later WITH GNU-compiler-exception
 # Do not provide URL for snapshots as the file lasts there only for 2 days.
 # ftp://sourceware.org/pub/gdb/releases/FIXME{tarname}.tar.xz
 #Source: %{tarname}.tar.xz
@@ -58,10 +78,7 @@ URL:                  https://gnu.org/software/gdb/
 %undefine _debuginfo_subpackages
 
 # For DTS RHEL<=7 GDB it is better to use none than a Requires dependency.
-%if 0%{!?rhel:1} || 0%{?rhel} > 7
-%if 0%{!?el9:1}
-Recommends:           %{?scl_prefix}gcc-gdb-plugin%{?_isa}
-%endif
+%if 0%{!?rhel:1}
 Recommends:           dnf-command(debuginfo-install)
 %endif
 
@@ -72,12 +89,17 @@ Recommends:           dnf-command(debuginfo-install)
 # below, but it cannot hurt either -- rdieter
 Conflicts:            gdb-headless < 7.12-29
 
-Summary:              A stub package for GNU source-level debugger
+Summary:              A GNU source-level debugger for C, C++, Fortran, Go and other languages
 Requires:             gdb-headless%{?_isa} = %{version}-%{release}
 
 %description
-'gdb' package is only a stub to install gcc-gdb-plugin for 'compile' commands.
-See package 'gdb-headless'.
+GDB, the GNU debugger, allows you to debug programs written in C, C++,
+Fortran, Go, and other languages, by executing them in a controlled
+fashion and printing their data.
+
+If you want to use GDB for development purposes, you should install
+the 'gdb' package which will install 'gdb-headless' and possibly other
+useful packages too.
 
 %package headless
 %endif
@@ -90,7 +112,7 @@ Summary:              A GNU source-level debugger for C, C++, Fortran, Go and ot
 Obsoletes:            gdb64 < 5.3.91
 %endif
 
-%ifarch %{arm}
+%ifarch %{arm} riscv64
 %global have_inproctrace 0
 %else
 %global have_inproctrace 1
@@ -139,6 +161,9 @@ Recommends:           default-yama-scope
 %if 0%{?fedora} >= 31 || 0%{?rhel} >= 9
 %global librpmver 9
 %endif
+%if 0%{?fedora} >= 39 || 0%{?rhel} >= 10
+%global librpmver 10
+%endif
 %endif
 %endif
 %if 0%{?__isa_bits} == 64
@@ -154,12 +179,12 @@ BuildRequires:        %{librpmname}
 Recommends:           %{librpmname}
 %endif
 
-%if 0%{?el6:1}
+%if 0%{?el6:1} || 0%{?el7:1}
 # GDB C++11 requires devtoolset gcc.
 BuildRequires:        %{?scl_prefix}gcc-c++
+%else
+BuildRequires:        gcc-c++
 %endif
-
-BuildRequires:        autoconf
 
 # GDB patches have the format `gdb-<version>-bz<red-hat-bz-#>-<desc>.patch'.
 # They should be created using patch level 1: diff -up ./gdb (or gdb-6.3/gdb).
@@ -191,11 +216,9 @@ Source5:              %{libstdcxxpython}.tar.xz
 Source6:              gdbtui
 
 # libipt: Intel Processor Trace Decoder Library
-%global libipt_version 2.0.4
+%global libipt_version 2.0.5
 #=fedora
 Source7:              v%{libipt_version}.tar.gz
-#=fedora
-Patch1142:            v1.5-libipt-static.patch
 
 # Include the auto-generated file containing the "Patch:" directives.
 # See README.local-patches for more details.
@@ -203,14 +226,15 @@ Patch9998:            _gdb.spec.Patch.include
 Patch9999:            _gdb.spec.patch.include
 %include %{PATCH9998}
 
-%if 0%{!?rhel:1} || 0%{?rhel} > 6
-# RL_STATE_FEDORA_GDB would not be found for:
-# Patch642: gdb-readline62-ask-more-rh.patch
-# --with-system-readline
-BuildRequires:        readline-devel%{buildisa} >= 6.2-4
-%endif # 0%{!?rhel:1} || 0%{?rhel} > 6
+# System readline is too old prior to RHEL8.
+%if 0%{!?rhel:1} || 0%{?rhel} > 7
+%global use_system_readline 1
+BuildRequires:        readline-devel%{buildisa} >= 7.0
+%else
+%global use_system_readline 0
+%endif
 
-BuildRequires:        gcc-c++ ncurses-devel%{buildisa} texinfo gettext flex bison
+BuildRequires:        ncurses-devel%{buildisa} texinfo gettext flex bison
 BuildRequires:        expat-devel%{buildisa}
 %if 0%{!?rhel:1} || 0%{?rhel} > 6
 BuildRequires:        xz-devel%{buildisa}
@@ -221,6 +245,7 @@ BuildRequires:        zlib-devel%{buildisa} libselinux-devel%{buildisa}
 %if 0%{!?_without_python:1}
 %if 0%{?rhel:1} && 0%{?rhel} <= 7
 BuildRequires:        python-devel%{buildisa}
+%global __python /usr/bin/python2
 %else
 %global __python %{__python3}
 BuildRequires:        python3-devel%{buildisa}
@@ -241,10 +266,17 @@ BuildRequires:        texlive-collection-latexrecommended
 BuildRequires:        /usr/bin/pod2man
 %if 0%{!?rhel:1} || 0%{?rhel} > 7
 BuildRequires:        libbabeltrace-devel%{buildisa}
-%if 0%{?rhel} < 9
+    %if %{defined use_guile}
+        %if 0%{!?rhel:1}
+BuildRequires:        guile22-devel%{buildisa}
+        %endif
+        # Guile is only supported prior to RHEL9, where it was called "guile".
+        %if 0%{?rhel:1} && 0%{?rhel} < 9
 BuildRequires:        guile-devel%{buildisa}
+        %endif
+    %endif
 %endif
-%endif
+
 %global have_libipt 0
 %if 0%{!?rhel:1} || 0%{?rhel} > 7 || (0%{?rhel} == 7 && 0%{?scl:1})
 %ifarch %{ix86} x86_64
@@ -262,11 +294,32 @@ BuildRequires:        libipt-devel%{buildisa}
 # Fedora < 32, and mpfr-4 on Fedora 32+ and RHEL-9+.
 BuildRequires:        mpfr-devel%{buildisa}
 %endif
+# RHEL6 doesn't have source-highlight.
+%if 0%{!?rhel:1} || 0%{?rhel} > 6
 BuildRequires:        source-highlight-devel
+%endif
 %if 0%{!?rhel:1}
 BuildRequires:        xxhash-devel
 %endif
+
+# Special case: on RHEL8+, we simply require the system debuginfod.
+# Otherwise, we require the SCL version.  Except on RHEL6, where debuginfod
+# is not supported at all.
+%global have_debuginfod 0
+%global use_scl_for_debuginfod 0
+%if 0%{!?rhel:1} || 0%{?rhel} >= 8
+%global have_debuginfod 1
 BuildRequires:        elfutils-debuginfod-client-devel
+%else
+%if 0%{!?el6:1} && 0%{?scl:1}
+%global have_debuginfod 1
+%global use_scl_for_debuginfod 1
+BuildRequires:        elfutils-debuginfod-client-devel
+%endif
+%endif
+
+# Workaround for missing boost-devel dependency (rhbz 1718480)
+BuildRequires:        boost-devel
 
 %if 0%{?_with_testsuite:1}
 
@@ -274,7 +327,7 @@ BuildRequires:        elfutils-debuginfod-client-devel
 %global bits_local %{?_isa}
 %global bits_other %{?_isa}
 %ifarch s390x
-%if 0%{!?rhel:1} || 0%{?rhel} < 8
+%if 0%{?rhel:1} && 0%{?rhel} < 8
 %global bits_other (%{__isa_name}-32)
 %endif
 %else #!s390x
@@ -289,14 +342,15 @@ BuildRequires:        elfutils-debuginfod-client-devel
 
 BuildRequires:        sharutils dejagnu
 # gcc-objc++ is not covered by the GDB testsuite.
-BuildRequires:        gcc gcc-c++ gcc-gfortran
+# Test supported SCL toolchain components.
+BuildRequires:        %{?scl_testing_prefix}gcc %{?scl_testing_prefix}gcc-c++ %{?scl_testing_prefix}gcc-gfortran
+
 %if 0%{!?rhel:1} || 0%{?rhel} < 8
 BuildRequires:        gcc-objc
 %endif
-%if 0%{!?rhel:1} || 0%{?rhel} > 7
-%if 0%{!?el9:1}
-BuildRequires:        gcc-gdb-plugin%{?_isa}
-%endif
+# We don't support gcc-gdb-plugin on RHEL anymore.
+%if 0%{!?rhel:1}
+BuildRequires:        %{?scl_prefix}gcc-gdb-plugin%{?_isa}
 %endif
 %if 0%{?rhel:1} && 0%{?rhel} < 7
 BuildRequires:        gcc-java libgcj%{bits_local} libgcj%{bits_other}
@@ -331,8 +385,8 @@ BuildRequires:        prelink
 BuildRequires:        opencl-headers ocl-icd-devel%{bits_local} ocl-icd-devel%{bits_other}
 %endif
 %if 0%{!?rhel:1}
-# Fedora arm+ppc64le do not yet have fpc built.
-%ifnarch %{arm} ppc64le
+# Fedora arm+ppc64le+s390x do not yet have fpc built.
+%ifnarch %{arm} ppc64le s390x
 BuildRequires:        fpc
 %endif
 %endif
@@ -344,7 +398,7 @@ BuildRequires:        gcc-gnat
 BuildRequires:        libgnat%{bits_local} libgnat%{bits_other}
 %endif
 %else
-%ifarch %{ix86} x86_64 ia64 ppc %{power64} alpha s390x %{arm} aarch64
+%ifarch %{ix86} x86_64 ia64 ppc %{power64} alpha s390x %{arm} aarch64 riscv64
 %if 0%{!?rhel:1}
 BuildRequires:        gcc-gnat
 BuildRequires:        libgnat%{bits_local} libgnat%{bits_other}
@@ -361,10 +415,10 @@ BuildRequires:        libstdc++%{bits_local} libstdc++%{bits_other}
 BuildRequires:        libquadmath%{bits_local} libquadmath%{bits_other}
 %endif
 %endif
-BuildRequires:        glibc-static%{bits_local}
 # multilib glibc-static is open Bug 488472:
-#BuildRequires: glibc-static%{bits_other}
-# Exception for RHEL<=7
+%if 0%{?rhel} > 6
+BuildRequires:        glibc-static%{bits_other}
+%endif
 %ifarch s390x
 BuildRequires:        valgrind%{bits_local}
 %if 0%{!?rhel:1} || 0%{?rhel} > 7
@@ -379,10 +433,11 @@ BuildRequires:        xz
 %if 0%{!?rhel:1} || 0%{?rhel} > 7
 BuildRequires:        rust
 %endif
-
-BuildRequires:        %{?scl_prefix}elfutils-debuginfod
+%if 0%{!?el6:1}
+BuildRequires:        elfutils-debuginfod
+%endif
 %endif # 0%{?_with_testsuite:1}
-BuildRequires:        make
+BuildRequires:        make gmp-devel
 
 %{?scl:Requires:%scl_runtime}
 
@@ -408,8 +463,8 @@ Conflicts:            %{name}-headless > %{version}-%{release}
 
 %description minimal
 GDB, the GNU debugger, allows you to debug programs written in C, C++,
-Java, and other languages, by executing them in a controlled fashion
-and printing their data.
+Fortran, Go, and other languages, by executing them in a controlled
+fashion and printing their data.
 
 This package provides a minimal version of GDB, tailored to be used by
 the Fedora buildroot.  It should probably not be used by end users.
@@ -420,8 +475,8 @@ Summary:              A standalone server for GDB (the GNU source-level debugger
 
 %description gdbserver
 GDB, the GNU debugger, allows you to debug programs written in C, C++,
-Java, and other languages, by executing them in a controlled fashion
-and printing their data.
+Fortran, Go, and other languages, by executing them in a controlled
+fashion and printing their data.
 
 This package provides a program that allows you to run GDB on a different
 machine than the one which is running the program being debugged.
@@ -455,10 +510,6 @@ tar xJf %{SOURCE5}
 
 %if 0%{have_libipt} && 0%{?el7:1} && 0%{?scl:1}
 tar xzf %{SOURCE7}
-(
- cd libipt-%{libipt_version}
-%patch1142 -p1
-)
 %endif
 
 # Files have `# <number> <file>' statements breaking VPATH / find-debuginfo.sh .
@@ -474,25 +525,58 @@ find -name "*.info*"|xargs rm -f
 # See README.local-patches for more details.
 %include %{PATCH9999}
 
-# The above patches twiddle a .m4 file for configure, so update the affected
-# configure files
-pushd libiberty
-autoconf -f
-popd
-pushd intl
-autoconf -f
-popd
-
 find -name "*.orig" | xargs rm -f
 ! find -name "*.rej" # Should not happen.
 
-# Change the version that gets printed at GDB startup, so it is RH specific.
+# In the past a distro name prefix was added to the version string in
+# version.in.
+#
+# However, placing text at the start of version.in can cause problems;
+# GDB will have a version string that starts with text rather than a
+# number as is the case with upstream GDB, and for most (all?) other
+# distros.
+#
+# GDB's version string is exposed to users as part of the Python API,
+# and it is not uncommon for users to try and grok the version number
+# from this string.  Having Fedora/RHEL GDB not start with the major
+# version number can be unexpected, and might cause tools/script that
+# work for other builds of GDB to fail with Fedora/RHEL GDB.
+#
+# So, we switched to use the more standard --with-pkgversion configure
+# option.  This ensures the distro name is still included in the 'gdb
+# --version' output, but the text is no longer part of the string
+# exposed in the Python API.
+#
+# Unfortunately, for RHEL the dist_name macro is not defined.  At
+# least not on RHEL 9 or earlier.  So, if dist_name is not defined,
+# but the rhel macro is, then we use a hard-coded RHEL appropriate
+# string.
+#
+# FIXME: It would be nice to rewrite this using %elif, but this is not
+# supported on older (pre 9) RHEL systems.
+
+%if 0%{?dist_name:1}
+
+%global pkgversion_configure_flag --with-pkgversion=%{dist_name}
+
+%else
+
+%if 0%{?fedora:1}
+%global pkgversion_configure_flag --with-pkgversion=Fedora Linux
+%endif
+
+%if 0%{?rhel:1}
+%global pkgversion_configure_flag --with-pkgversion=OpenELA
+%endif
+
+%endif
+
+# 2hange the version that gets printed by GDB.  The 'version' here is
+# usually the same as the original upstream version on which we are
+# based.  The 'release' is new information we're adding and identifies
+# the modifications we've made to upstream.
 cat > gdb/version.in << _FOO
-%if 0%{!?rhel:1}
-Fedora %{version}-%{release}
-%else # !0%{!?rhel:1} 
-OpenELA %{version}-%{release}
-%endif # !0%{!?rhel:1} 
+%{?version_prefix:%version_prefix }%{version}-%{release}
 _FOO
 
 # Remove the info and other generated files added by the FSF release
@@ -503,14 +587,11 @@ rm -f bfd/doc/*.info-*
 rm -f gdb/doc/*.info
 rm -f gdb/doc/*.info-*
 
-%if 0%{!?rhel:1} || 0%{?rhel} > 6
-# RL_STATE_FEDORA_GDB would not be found for:
-# Patch642: gdb-readline62-ask-more-rh.patch
-# --with-system-readline
+%if 0%{use_system_readline}
 mv -f readline/readline/doc readline-doc
 rm -rf readline/readline/*
 mv -f readline-doc readline/readline/doc
-%endif # 0%{!?rhel:1} || 0%{?rhel} > 6
+%endif
 
 rm -rf zlib texinfo
 
@@ -533,19 +614,22 @@ COMMON_GDB_CONFIGURE_FLAGS="\
 	--mandir=%{_mandir}					\
 	--infodir=%{_infodir}					\
 	--with-gdb-datadir=%{_datadir}/gdb			\
-	--enable-gdb-build-warnings=,-Wno-unused		\
+	--enable-gdb-build-warnings=,-Wno-unused,-Wno-deprecated-declarations,-Wno-unused-function,-Wno-stringop-overflow\
+%ifarch %{ix86}
+,-Wno-format-overflow\
+%endif
 	--enable-build-with-cxx					\
-%ifnarch %{ix86} alpha ppc s390 s390x x86_64 ppc64 ppc64le sparc sparcv9 sparc64 %{arm} aarch64
+%ifnarch %{ix86} alpha ppc s390 s390x x86_64 ppc64 ppc64le sparc sparcv9 sparc64 %{arm} aarch64 riscv64
 	--disable-werror					\
 %else
 	--enable-werror						\
 %endif
 	--with-separate-debug-dir=/usr/lib/debug		\
-	--disable-sim						\
+	--disable-sim			                	\
 	--disable-rpath						\
 	--without-stage1-ldflags				\
 	--disable-libmcheck					\
-%if 0%{!?rhel:1} || 0%{?rhel} > 6
+%if 0%{use_system_readline}
 	--with-system-readline					\
 %else
 	--without-system-readline				\
@@ -555,9 +639,7 @@ COMMON_GDB_CONFIGURE_FLAGS="\
 	--without-mmap						\
 %endif
 	--enable-64-bit-bfd					\
-%if 0%{!?rhel:1} || 0%{?rhel} > 6
-	--with-mpfr						\
-%else
+%if 0%{?rhel:1} && 0%{?rhel} <= 6
 	--without-mpfr						\
 %endif
 	--with-system-zlib					\
@@ -566,7 +648,9 @@ COMMON_GDB_CONFIGURE_FLAGS="\
 %else
 	--without-lzma						\
 %endif
+%if 0%{!?rhel:1} || 0%{?have_debuginfod}
         --with-debuginfod					\
+%endif
 %if 0%{?rhel:1}
 	--disable-libctf
 %endif
@@ -597,15 +681,24 @@ GDB_MINIMAL_CONFIGURE_FLAGS="\
     --disable-unit-tests \
     --disable-source-highlight"
 
-export CFLAGS="$RPM_OPT_FLAGS %{?_with_asan:-fsanitize=address}"
-export LDFLAGS="%{?__global_ldflags} %{?_with_asan:-fsanitize=address}"
+# Populate CFLAGS, LDFLAGS, CC, CXX, etc.
+%set_build_flags
+CFLAGS="$CFLAGS %{?_with_asan:-fsanitize=address}"
+LDFLAGS="$LDFLAGS %{?_with_asan:-fsanitize=address}"
+CXXFLAGS="$CXXFLAGS %{?_with_asan:-fsanitize=address}"
 
-export CXXFLAGS="$CFLAGS"
+# If using an SCL for debuginfod, add path to SCL's pkgconfig directory.
+%if 0%{?have_debuginfod} && 0%{?use_scl_for_debuginfod}
+export PKG_CONFIG_PATH=%{_libdir}/pkgconfig
+%endif
 
 # --htmldir and --pdfdir are not used as they are used from %{gdb_build}.
 ../configure							\
 	${COMMON_GDB_CONFIGURE_FLAGS}				\
 	${GDB_MINIMAL_CONFIGURE_FLAGS}				\
+%if 0%{?pkgversion_configure_flag:1}
+	"%{pkgversion_configure_flag}"				\
+%endif
 	--with-auto-load-dir='$debugdir:$datadir/auto-load%{?scl::%{_root_datadir}/gdb/auto-load}'	\
 	--with-auto-load-safe-path='$debugdir:$datadir/auto-load%{?scl::%{_root_datadir}/gdb/auto-load}'	\
 %ifarch sparc sparcv9
@@ -635,30 +728,6 @@ export LDFLAGS="%{?__global_ldflags} %{?_with_asan:-fsanitize=address}"
 CFLAGS="$CFLAGS -DDNF_DEBUGINFO_INSTALL"
 %endif
 
-# Patch833: gdb-6.6-buildid-locate-rpm-scl.patch
-%if 0%{?el6:1} && 0%{?scl:1}
-CFLAGS="$CFLAGS -DGDB_INDEX_VERIFY_VENDOR"
-%endif
-
-# [dts+el7] [x86*] Bundle linux_perf.h for libipt (RH BZ 1256513).
-%if %{have_libipt} && 0%{?el7:1} && 0%{?scl:1}
-CFLAGS="$CFLAGS -DPERF_ATTR_SIZE_VER5_BUNDLE"
-%endif
-
-# Patch642: gdb-readline62-ask-more-rh.patch
-%if 0%{?rhel} == 7
-CFLAGS="$CFLAGS -DNEED_RL_STATE_FEDORA_GDB"
-%else
-# FIXME: Why not just: ! grep -w ...
-if grep -w RL_STATE_FEDORA_GDB %{_includedir}/readline/readline.h;then false;fi
-%endif
-
-# Patch337: gdb-6.8-attach-signalled-detach-stopped.patch
-# Patch331: gdb-6.8-quit-never-aborts.patch
-%if 0%{?rhel:1} && 0%{?rhel} <= 6
-CFLAGS="$CFLAGS -DNEED_DETACH_SIGSTOP"
-%endif
-
 %if 0%{have_libipt} && 0%{?el7:1} && 0%{?scl:1}
 (
  mkdir libipt-%{libipt_version}-root
@@ -681,6 +750,13 @@ LDFLAGS="$LDFLAGS -L$PWD/libipt-%{libipt_version}-root%{_libdir}"
 
 export CXXFLAGS="$CFLAGS"
 
+# For DTS11+, gcc defaults to c++17, causing issues with system-installed
+# headers, e.g., python. Force to c++11.  We coerce all builds to use c++11
+# to facilitate testing.
+%if 0%{?rhel:1} && 0%{?rhel} < 8
+export CXXFLAGS="$CXXFLAGS -std=gnu++11"
+%endif
+
 # The configure flags we will use when building the full GDB.
 GDB_FULL_CONFIGURE_FLAGS="\
 	--with-system-gdbinit=%{_sysconfdir}/gdbinit		\
@@ -698,7 +774,7 @@ $(: ppc64 host build crashes on ppc variant of libexpat.so )	\
 %else
 	--without-python					\
 %endif
-%if 0%{!?rhel:1} || 0%{?rhel} == 8
+%if %{defined use_guile}
 	--with-guile						\
 %else
 	--without-guile						\
@@ -723,6 +799,9 @@ $(: ppc64 host build crashes on ppc variant of libexpat.so )	\
 ../configure							\
 	${COMMON_GDB_CONFIGURE_FLAGS}				\
 	${GDB_FULL_CONFIGURE_FLAGS}				\
+%if 0%{?pkgversion_configure_flag:1}
+	"%{pkgversion_configure_flag}"				\
+%endif
 	--with-auto-load-dir='$debugdir:$datadir/auto-load%{?scl::%{_root_datadir}/gdb/auto-load}'	\
 	--with-auto-load-safe-path='$debugdir:$datadir/auto-load%{?scl::%{_root_datadir}/gdb/auto-load}'	\
 %ifarch sparc sparcv9
@@ -853,6 +932,11 @@ gcc -o ./orphanripper %{SOURCE2} -Wall -lutil -ggdb2
   for test in				\
     gdb.base/readline-overflow.exp	\
     gdb.base/bigcore.exp		\
+%if 0%{?rhel} < 7 
+    gdb.base/gnu-debugdata.exp          \
+    gdb.base/access-mem-running.exp     \
+    gdb.threads/access-mem-running-thread-exit.exp \
+%endif
   ; do
     mv -f ../../gdb/testsuite/$test ../gdb/testsuite/$test-DISABLED || :
   done
@@ -861,7 +945,13 @@ gcc -o ./orphanripper %{SOURCE2} -Wall -lutil -ggdb2
   # See also: gdb-runtest-pie-override.exp
   ###CHECK="$(echo $CHECK|sed 's#check//unix/[^ ]*#& &/-fPIC/-pie#g')"
 
-  ./orphanripper %make_build -k $CHECK || :
+TESTS=""
+%if 0%{?tests:1}
+  for test in %{tests}; do
+    TESTS="${TESTS:+$TESTS }$test"
+  done
+%endif
+  ./orphanripper make %{?_smp_mflags} -k $CHECK TESTS="$TESTS" || :
 )
 for t in sum log
 do
@@ -943,7 +1033,7 @@ touch -r %{SOURCE4} $RPM_BUILD_ROOT%{_sysconfdir}/gdbinit
 for i in `find $RPM_BUILD_ROOT%{_datadir}/gdb/python/gdb -name "*.py"`
 do
   # Files could be also patched getting the current time.
-  touch -r $RPM_BUILD_DIR/%{gdb_src}/gdb/ChangeLog $i
+  touch -r $RPM_BUILD_DIR/%{gdb_src}/gdb/version.in $i
 done
 
 %if 0%{?_enable_debug_packages:1} && 0%{!?_without_python:1}
@@ -956,7 +1046,7 @@ done
 %endif # 0%{?_enable_debug_packages:1} && 0%{!?_without_python:1}
 
 # Compile python files
-%if 0%{!?_without_python:1}
+%if 0%{!?_without_python:1} && (0%{!?rhel:1} || 0%{?rhel} > 7)
 %py_byte_compile %{__python3} %{buildroot}%{_datadir}/gdb/python/gdb
 %endif
 
@@ -989,7 +1079,7 @@ cp -a $RPM_BUILD_DIR/%{gdb_src}/%{libstdcxxpython}/libstdcxx	\
 %endif # 0%{?rhel:1} && 0%{?rhel} <= 7
 for i in `find $RPM_BUILD_ROOT%{_datadir}/gdb -name "*.py"`; do
   # Files are installed by install(1) not preserving the timestamps.
-  touch -r $RPM_BUILD_DIR/%{gdb_src}/gdb/ChangeLog $i
+  touch -r $RPM_BUILD_DIR/%{gdb_src}/gdb/version.in $i
 done
 %endif # 0%{!?_without_python:1}
 
@@ -1007,10 +1097,11 @@ rm -rf $RPM_BUILD_ROOT%{_datadir}/locale/
 rm -f $RPM_BUILD_ROOT%{_infodir}/bfd*
 rm -f $RPM_BUILD_ROOT%{_infodir}/standard*
 rm -f $RPM_BUILD_ROOT%{_infodir}/configure*
+rm -f $RPM_BUILD_ROOT%{_infodir}/sframe-spec*
 # Just exclude the header files in the top directory, and don't exclude
 # the gdb/ directory, as it contains jit-reader.h.
 rm -rf $RPM_BUILD_ROOT%{_includedir}/*.h
-rm -rf $RPM_BUILD_ROOT/%{_libdir}/lib{bfd*,opcodes*,iberty*,ctf*}
+rm -rf $RPM_BUILD_ROOT/%{_libdir}/lib{bfd*,opcodes*,iberty*,ctf*,sframe*}
 
 # pstack obsoletion
 
@@ -1035,6 +1126,7 @@ ln -s gstack $RPM_BUILD_ROOT%{_bindir}/pstack
 # Documentation only for development.
 rm -f $RPM_BUILD_ROOT%{_infodir}/gdbint*
 rm -f $RPM_BUILD_ROOT%{_infodir}/stabs*
+rm -f $RPM_BUILD_ROOT%{_infodir}/ctf-spec*
 
 # Delete this too because the dir file will be updated at rpm install time.
 # We don't want a gdb specific one overwriting the system wide one.
@@ -1158,86 +1250,537 @@ fi
 %endif
 
 %changelog
-* Wed Dec 13 2023 Keith Seitz - 10.2-13.el9
-- Backport patches for "Fix undefined behaviour dereferencing empty string"
-  (Magne Hov et al, RHEL-17631)
+* Fri May 31 2024 Guinevere Larsen <blarsen@redhat.com> - 14.2-1.el9
+- Rebase to gdb-14.2 and update all bug references
+  (Resolves: RHEL-39554)
+  (Resolves: RHEL-39553)
+  (Resolves: RHEL-10550)
+  (Resolves: RHEL-39555)
+  (Resolves: RHEL-39585)
+  (Resolves: RHEL-36211)
 
-* Tue Oct  3 2023 Guinevere Larsen <blarsen@redhat.com> - 10.2-12.el9
-- Backport "libiberty: Fix infinite recursion in rust demangler."
-  (Nick Clifton)
-- Backport Add a recursion limit to the demangle_const function in the Rust demangler.
-  (Nick Clifton, RHEL-4234)
-- Backport Fix typo in recent code to add stack recursion limit to the Rust demangler.
-  (Nick Clifton)
+* Wed May 29 2024 Guinevere Larsen <blarsen@redhat.com> - 14.2-3.el8
+- Remove riscv64-linux-gnu target. It was never meant to be added.
 
-* Tue Oct  3 2023 Guinevere Larsen <blarsen@redhat.com>
-- Backport "Fix crash in Fortran code"
-  (Tom Tromey, RHEL-7328)
+* Thu May 16 2024 Guinevere Larsen <blarsen@redhat.com> - 14.2-2.el8
+- Backport "better support for $pc not saved"
+  (Andrew Burgess, RHEL-19390)
 
-* Wed Mar 29 2023 Bruno Larsen <blarsen@redhat.com> - 10.2-11.el9
-- Backport "libiberty: prevent buffer overflow when decoding user input"
-  (Luís Ferreira, RHBZ2132600)
+* Mon May 13 2024 Guinevere Larsen <blarsen@redhat.com>
+- Backport series Infcalls from B/P conditions in multi-threaded inferiors
+  (Andrew Burgess, RHEL-13298)
 
-* Mon Mar 27 2023 Bruno Larsen <blarsen@redhat.com>
-- Backport "[gdb/breakpoint] Fix assert in jit_event_handler"
-  (Tom de Vries, RHBZ 2130624)
+* Mon May 13 2024 Keith Seitz <keiths@redhat.com>
+- Backport "gdb: s390: Add arch14 record/replay support"
+  (Andreas Arnez, RHEL-36225)
+- Backport "Add support for Power11 options"
+  (Peter Bergner, RHEL-36518)
+- Backport "Sync x86 disassembler with (proposed) gdb-15.1 release."
+  (many authors, RHEL-36527)
 
-* Thu Mar 23 2023 Bruno Larsen <blarsen@redhat.com>
-- Bakport "Fix assertion failure in copy_type"
-  (Tom Tromey, RHBZ 2155439)
-- Bakport "[gdb/testsuite] Fix PR20630 regression test in gdb.base/printcmds.exp"
+* Tue Apr 23 2024 Guinevere Larsen <blarsen@redhat.com> - 14.2-1.el8
+- Initial import for GTS14.
+
+* Tue Mar 12 2024 Alexandra Hájková <ahajkova@redhat.com> - 14.2-1
+- Rebase to FSF GDB 14.2.
+
+* Wed Feb 21 2024 Richard W.M. Jones <rjones@redhat.com>
+- Bump and rebuild for riscv64
+
+* Mon Jan 29 2024 Kevin Buettner <kevinb@redhat.com> - 14.1-8
+- Backport upstream workaround for GCC 14 problem which is causing
+  GDB internal errors (RHBZ 261580, Tom de Vries).
+
+* Thu Jan 25 2024 Guinevere Larsen <blarsen@redhat.com>
+- Remove gdb-6.5-BEA-testsuite.patch, as it was upstreamed and
+  will make its way back with the next rebase.
+
+* Thu Jan 25 2024 Guinevere Larsen <blarsen@redhat.com> - 14.1-7
+- Backport "gdb: fix list . related crash"
+
+* Wed Jan 24 2024 Fedora Release Engineering <releng@fedoraproject.org>
+- Rebuilt for https://fedoraproject.org/wiki/Fedora_40_Mass_Rebuild
+
+* Fri Jan 19 2024 Fedora Release Engineering <releng@fedoraproject.org>
+- Rebuilt for https://fedoraproject.org/wiki/Fedora_40_Mass_Rebuild
+
+* Tue Jan 16 2024 Kevin Buettner <kevinb@redhat.com> - 14.1-4
+- Backport upstream commit bc23ea51f8a83e9524dfb553baa8baacb29e68a9,
+  potentially fixing RHBZ 2257562.
+
+* Thu Jan 11 2024 Alexandra Hájková <ahajkova@redhat.com> - 14.1-3
+- Fix typo in gdb.spec.
+
+* Mon Jan 8 2024 Alexandra Hájková <ahajkova@redhat.com> - 14.1-2
+- Backport upstream commits 7ae9ecfd801 and 8170efad364 to avoid
+  using _PyOS_ReadlineTState  (RHBZ 2250652).
+
+* Fri Dec 8 2023 Kevin Buettner <kevinb@redhat.com> - 14.1-1
+- Rebase to FSF GDB 14.1.
+- Update local patches:
+    gdb-6.5-bz185337-resolve-tls-without-debuginfo-v2.patch
+    gdb-6.6-buildid-locate-rpm.patch
+    gdb-6.6-buildid-locate.patch
+    gdb-container-rh-pkg.patch
+    gdb-core-open-vdso-warning.patch
+    gdb-fedora-libncursesw.patch
+    gdb-linux_perf-bundle.patch
+- Update backported patches which didn't make it into 14.1:
+    gdb-rhbz-2232086-cpp-ify-mapped-symtab.patch
+    gdb-rhbz-2232086-generate-gdb-index-consistently.patch
+- Drop upstreamed local patches:
+    gdb-6.5-sharedlibrary-path.patch
+- Drop gdb-13.2 backports (which are now in gdb-14.1):
+    gdb-binutils29988-read_indexed_address.patch
+    gdb-bz2196395-debuginfod-legacy-openssl-crash.patch
+    gdb-bz2237392-dwarf-obstack-allocation.patch
+    gdb-bz2237515-debuginfod-double-free.patch
+    gdb-rhbz2192105-ftbs-dangling-pointer
+    gdb-rhbz2233961-CVE-2022-4806.patch
+    gdb-rhbz2233965-memory-leak.patch
+- Adjust gdb.spec so that --with-mpfr is no longer passed to
+  configure; doing so, combined with some configury changes triggered
+  a latent build problem.
+
+* Mon Dec 4 2023 Kevin Buettner <kevinb@redhat.com>
+- Remove gdb-6.5-missed-trap-on-step-test.patch.  Testing what happens
+  when stepping over/through a statement which triggers a watchpoint
+  is being added, upstream, to gdb.base/watchpoint.exp.
+
+* Tue Nov 28 2023 Andrew Burgess <aburgess@redhat.com>
+- Backport upstream commits 1f0fab7ff86, aa19bc1d259, acc117b57f7,
+  aff250145af, and 3644f41dc80.  These commits reduce the size of the
+  generated gdb-index file, and also ensure that the gdb-index and
+  dwarf-5 index are generated consistently even as the number of
+  worker threads that GDB uses changes (RHBZ 2232086).
+
+* Thu Oct 19 2023 Alexandra Hájková <ahajkova@redhat.com>
+- Remove gdb-6.5-ia64-libunwind-leak-test.patch.
+  The patch doesn't include any actual fixes, the architecture
+  is end of life and the kernel is planning to drop IA64 support.
+
+* Wed Oct 11 2023 Guinevere Larsen <blarsen@redhat.com>
+- Remove gdb-rhbz1186476-internal-error-unqualified-name-re-set-test.patch
+  as it was upstreamed back in 2010 with a different test name.
+
+* Mon Oct 2 2023 Kevin Buettner <kevinb@redhat.com> - 13.2-11
+- Backport upstream commit which prevents internal error when
+  generating an overly large gdb-index file.  (RHBZ 1773651, Kevin
+  Buettner.)
+
+* Sun Oct 1 2023 Alexandra Hájková <ahajkova@redhat.com> - 13.2-10
+- Backport upstream commit d28fbc7197b which fixes RHBZ 2233965 (
+  CVE-2022-48065).
+
+* Thu Sep 28 2023 Kevin Buettner <kevinb@redhat.com>
+- Remove gdb-6.5-sharedlibrary-path.patch, which was upstreamed in
+  commit 3ec033fab4a.
+
+* Tue Sep 19 2023 Keith Seitz <keiths@redhat.com>
+- Remove gdb-rhbz1553104-s390x-arch12-test.patch, which is more thoroughly tested
+  by binutils.
+
+* Mon Sep 18 2023 Alexandra Hájková <ahajkova@redhat.com> - 13.2-8
+- Bump release to 13.2-9.
+
+* Sun Sep 17 2023 Alexandra Hájková <ahajkova@redhat.com> - 13.2-8
+- Backport upstream commit 8f2c64de86b which fixes RHBZ 2233961,
+  CVE-2022-48064, (Alan Modra).
+
+* Fri Sep 15 2023 Keith Seitz <keiths@redhat.com> - 13.2-8
+- migrated to SPDX license
+
+* Fri Sep 15 2023 Andrew Burgess <aburgess@redhat.com>
+- Bump release to 13.2-8.
+
+* Thu Sep 14 2023 Andrew Burgess <aburgess@redhat.com>
+- Backport upstream commit 54392c4df604f20, which fixes RHBZ 2237392.
+
+* Wed Sep 13 2023 Andrew Burgess <aburgess@redhat.com>
+- Backport upstream commit f96328accde1e63, which fixes RHBZ 2237515.
+
+* Wed Aug  9 2023 Guinevere Larsen <blarsen@redhat.com>
+- Remove gdb-6.7-testsuite-stable-results.patch, it only made the test
+  fail more.
+
+* Mon Aug  7 2023 Kevin Buettner <kevinb@redhat.com> - 13.2-7
+- Bump release.
+
+* Thu Aug  3 2023 Andrew Burgess <aburgess@redhat.com>
+- Backport upstream commit f3eee586174, which fixes RHBZ 2196395.
+
+* Wed Jul 19 2023 Fedora Release Engineering <releng@fedoraproject.org>
+- Rebuilt for https://fedoraproject.org/wiki/Fedora_39_Mass_Rebuild
+
+* Fri Jul 07 2023 Python Maint <python-maint@redhat.com>
+- Rebuilt for Python 3.12
+
+* Tue Jul  4 2023 Andrew Burgess <aburgess@redhat.com>
+- Remove gdb-test-pid0-core.patch.  This work has been upstreamed in
+  commit 8bcead69665.
+
+* Sat Jul  1 2023 Mark Wielaard <mjw@fedoraproject.org> - 13.2-4
+- Adjust gdb-add-index.patch to be silent about which gdb.
+
+* Fri Jun 30 2023 Kevin Buettner <kevinb@redhat.com> - 13.2-3
+- Backport upstream changes which prevent repeated warnings from being
+  printed when loading a core file  (RHBZ 2160211, Lancelot SIX).
+
+* Wed Jun 28 2023 Python Maint <python-maint@redhat.com> - 13.2-2
+- Rebuilt for Python 3.12
+
+* Sun Jun 25 2023 Alexandra Hájková <ahajkova@redhat.com> - 13.2-1
+- Rebase to FSF GDB 13.22.
+- Remove gdb-rhbz2177655-aarch64-pauth-valid-regcache.patch.
+- Remove gdb-rhbz2183595-rustc-inside_main.patch.
+
+* Tue Jun 13 2023 Python Maint <python-maint@redhat.com>
+- Rebuilt for Python 3.12
+
+* Tue Jun 13 2023 Python Maint <python-maint@redhat.com>
+- Bootstrap for Python 3.12
+
+* Sat May 20 2023 Andrew Burgess <aburgess@redhat.com>
+- Remove gdb-lineno-makeup-test.patch.  An equivalent test has now
+  been merged to upstream binutils-gdb in commit ef56b006501.
+
+* Tue May 16 2023 Andrew Burgess <aburgess@redhat.com>
+- Remove gdb-ccache-workaround.patch.  This patch works around
+  problems when using older versions of ccache, however, upstream GDB
+  now disables ccache during testing, see upstream commit 49b4de64242d.
+
+* Tue May 16 2023 Andrew Burgess <aburgess@redhat.com>
+- Remove gdb-ppc-power7-test.patch, this patch is already covered by
+  upstream tests gdb.arch/powerpc-*.exp.
+
+* Sat May 6 2023 Alexandra Hájková <ahajkova@redhat.com>
+- Remove gdb-rhel5.9-testcase-xlf-var-inside-mod.patch, the patch adds
+  gdb.fortran/xlf-variable.exp test, the test can only be run on
+  PPC64 machines which are not supported anymore.
+
+* Thu May 4 2023 Kevin Buettner <kevinb@redhat.com>
+- Fix C89-isms in gdb-6.6-buildid-locate-rpm.patch.  (Florian Weimer,
+  RHBZ 2143992)'.  This change merely restores changes introduced by
+  Keith's Nov 30 2022 commit, but which were inadvertently lost during
+  the GDB 13.1 backport.
+
+* Thu May 4 2023 Andrew Burgess <aburgess@redhat.com>
+- Rewrite the changes to gdb-add-index.sh.  If the user has set the
+  GDB environment variable then use that value, otherwise find a
+  suitable GDB executable by looking in various places.
+
+* Wed May 3 2023 Kevin Buettner <kevinb@redhat.com> 13.1-5
+- Backport "Pass const frame_info_ptr reference for
+  skip_[language_]trampoline". (Mark Wielaard, RHBZ 2192105, build/30413)
+
+* Tue May 2 2023 Andrew Burgess <aburgess@redhat.com>
+- Remove gdb-opcodes-clflushopt-test.patch.  This patch tests that GDB
+  can disassemble the clflushopt instruction correctly.  Such
+  disassembly is a feature of libopcode and is covered by the gas
+  tests i386/x86-64-clflushopt.s and i386/clflushopt.s.  Lets remove
+  this test from GDB and just rely on the gas tests instead.
+
+* Sat Apr 29 2023 Kevin Buettner <kevinb@redhat.com>
+- Remove gdb-6.7-charsign-test.patch. This patch originally contained
+  some changes to GDB which were rejected by upstream maintainers.  All
+  that remained was a testcase which had a number of failures due to
+  the rest of the work not being present in GDB.
+
+* Tue Apr 25 2023 Bruno Larsen <blarsen@redhat.com>
+- Remove gdb-6.5-bz109921-DW_AT_decl_file-test.patch. That patch was
+  only a test for basic DWARF-2 support, ensuring that GDB found a
+  variable in a .h file; tests such as gdb.linespec/linespec.exp already
+  tests for it.
+
+* Mon Apr 24 2023 Bruno Larsen <blarsen@redhat.com>
+- Remove gdb-6.5-last-address-space-byte-test.patch. It was used to
+  test for a regression in target_xfer_memory, a function that has
+  been removed from upstream back in 2006.
+
+* Thu Apr 13 2023 Alexandra Hájková <ahajkova@redhat.com>
+- Remove gdb-6.3-bz140532-ppc-unwinding-test.patch, it adds
+  powerpc-bcl-prologue.exp test which seems to be a subset of
+  upstream powerpc-prologue.exp
+
+* Tue Apr 11 2023 Keith Seitz
+- Backport "Fix a potential illegal memory access in the BFD library..."
+  (Nick Clifton, binutils/29988)
+
+* Fri Mar 31 2023 Keith Seitz <keiths@redhat.com> - 13.1-4
+- Backport "Fix crash in inside_main_func"
+  (Tom Tromey, RHBZ 2183595)
+
+* Thu Mar 30 2023 Alexandra Hájková <ahajkova@redhat.com> - 12.1-3
+- Update gdb-6.6-buildid-locate.patch to fix RHBZ 2181221.
+
+* Wed Mar 29 2023 Andrew Burgess <aburgess@redhat.com>
+- Used --with-pkgversion to place the distribution name in the version
+  string rather than placing the string directly into the version.in
+  file.
+
+* Fri Mar 24 2023 Kevin Buettner <kevinb@redhat.com> - 13.1-2
+- Backport fix for RHBZ 2177655.  (Luis Machado)
+
+* Mon Mar 20 2023 Bruno Larsen <blarsen@redhat.com>
+- Remove gdb-rhbz1350436-type-printers-error.patch since it is upstreamed.
+
+* Wed Mar 8 2023 Kevin Buettner <kevinb@redhat.com> - 13.1-1
+- Rebase to FSF GDB 13.1.
+- Update gdb-6.3-rh-testversion-20041202.patch.
+- Update gdb-6.3-bz140532-ppc-unwinding-test.patch.
+- Update gdb-6.6-buildid-locate.patch.
+- Update gdb-6.6-buildid-locate-rpm.patch.
+- Remove 'Recommends: ' line for gcc-gdb-plugin for BZ2149246.
+- Add 'define _lto_cflags %{nil}' to avoid ODR violations.
+- Add -Wno-stringop-overflow to --enable-gdb-build-warnings to work around
+  gcc problem.
+
+* Fri Jan 27 2023 Kevin Buettner <kevinb@redhat.com> - 12.1-16
+- Tweak gdb-6.3-rh-testversion-20041202.patch so that $_gdb_major
+  and $_gdb_minor will be obtained correctly.
+
+* Thu Jan 26 2023 Bruno Larsen <blarsen@redhat.com>
+- Remove gdb-rhbz1398387-tab-crash-test.patch as that test didn't
+  work anymore.
+
+* Tue Jan 24 2023 Keith Seitz <keiths@redhat.com> - 12.1-15
+- NVR bump for failed build.
+
+* Mon Jan 23 2023 Kevin Buettner <kevinb@redhat.com>
+- More tweaks to gdb-6.6-buildid-locate-rpm.patch, in which rpmTag
+  is replaced with rpmDbiTagVal.
+
+* Mon Jan 23 2023 Keith Seitz <keiths@redhat.com> - 12.1-14
+  From Sergey Mende:
+- Backport upstream patch "gdb: call check_typedef at beginning of
+  dwarf_expr_context::fetch_result". (Simon Marchi)
+
+
+* Fri Jan 20 2023 Kevin Buettner <kevinb@redhat.com> - 12.1-13
+- Backport fix for problems associated with GCC 13's self-move warning.
+  (Jan-Benedict Glaw)
+- Tweak gdb-6.6-buildid-locate-rpm.patch so that running GDB's configure
+  script will not error out due to GCC 13's warnings.
+
+* Thu Jan 19 2023 Alexandra Hájková <ahajkova@redhat.com> - 12.1-12
+- Backport replace deprecated distutils.sysconfig in python-config.
+  (Lancelot SIX)
+
+* Thu Jan 19 2023 Fedora Release Engineering <releng@fedoraproject.org>
+- Rebuilt for https://fedoraproject.org/wiki/Fedora_38_Mass_Rebuild
+
+* Mon Dec 19 2022 Andrew Burgess <aburgess@redhat.com>
+- Backport upstream commits 38665d717a3 and c3efaf0afd9 to fix RHBZ
+  2152431.
+
+* Fri Dec 16 2022 Keith Seitz <keiths@redhat.com>
+- Remove gdb-6.6-buildid-locate-rpm-scl.patch and
+  gdb-bz601887-dwarf4-rh-test.patch.
+
+* Fri Dec 9 2022 Andrew Burgess <aburgess@redhat.com>
+- Remove gdb-fortran-frame-string.patch, a version of this test has
+  now been upstreamed.
+
+* Fri Dec 9 2022 Andrew Burgess <aburgess@redhat.com>
+- Remove gdb-bfd-aliasing.patch.
+
+* Fri Dec 9 2022 Andrew Burgess <aburgess@redhat.com>
+- Remove gdb-entryval-crash-1of3.patch, gdb-entryval-crash-2of3.patch,
+  and gdb-entryval-crash-3of3.patch.
+
+* Wed Dec 7 2022 Keith Seitz <keiths@redhat.com> - 12.1-10
+- Disable Guile support for F38+, RHBZ 2151328.
+
+* Mon Dec 5 2022 Keith Seitz <keiths@redhat.com>
+- Remove gdb-physname-pr11734-test.patch,
+  gdb-physname-pr12273-test.patch, gdb-runtest-pie-override.patch,
+  gdb-test-expr-cumulative-archer.patch.
+
+* Thu Dec 1 2022 Kevin Buettner <kevinb@redhat.com>
+- Remove gdb-6.3-threaded-watchpoints2-20050225.patch.  The test in this
+  patch is a tweaked version of upstream test gdb.threads/watchthreads.exp
+  from 2004.  It doesn't actually test anything new.
+
+* Thu Dec 1  2022 Bruno Larsen <blarsen@redhat.com>
+- Remove gdb-rhbz1325795-framefilters-test.patch.  This test doesn't
+  pass in the curret state, and the code that introduced the original
+  problem has been changed beyong recognition at this point.
+
+* Wed Nov 30 2022 Keith Seitz <keiths@redhat.com>
+- Backport "libiberty: Fix C89-isms in configure tests" and do likewise in
+  gdb-6.6-buildid-locate-rpm.patch.
+  (Florian Weimer, RHBZ 2143992)
+
+* Wed Nov 23 2022 Kevin Buettner <kevinb@redhat.com>
+- Remove gdb-6.3-inheritancetest-20050726.patch.  Upstream testcase
+  gdb.cp/impl-this.exp tests the printing of an instance variable from
+  an inherited class in the "print c" test. 
+
+* Fri Nov 18 2022 Kevin Buettner <kevinb@redhat.com>
+- Remove gdb-6.3-test-movedir-20050125.patch.  Upstream test
+  gdb.base/fullname.exp provides coverage for this case and more.
+
+* Thu Nov  3 2022 Keith Seitz <keiths@redhat.com> - 12.1-9
+- Add patch to fix ODR violations on powerpc and
+  enable LTO builds. (Keith Seitz, sw build/23395)
+
+* Tue Oct 18 2022 Bruno Larsen - 12.1-8
+- Backport fix to gdb.base/break-main-file-remove-fail.exp
   (Tom de Vries)
 
-* Tue May 24 2022 Keith Seitz <keiths@redhat.com> - 10.2-10.el9
-- Backport "fix logic of find_comp_unit and set_comp_unit"
-  (Simon Marchi, RHBZ 2086761)
+* Tue Oct 18 2022 Bruno Larsen - 12.1-7
+- Remove patch gdb-6.3-test-dtorfix.
+  Was upstreamed, will be back in the next rebase.
 
-* Mon Apr 11 2022 Bruno Larsen <blarsen@redhat.com>
-- Backport Add Power 10 PLT instruction patterns
-  (Carl Love, RHBZ 1870017)
+* Thu Oct 13 2022 Alexandra Hájková - 12.1-7
+- Bump the release number.
 
-* Mon Nov  1 2021 Keith Seitz <keiths@redhat.com> - 10.2-9.el9
-- Backport IBM arch14 updates.
-  (Andreas Krebbel, RHBZ 2012819)
+* Tue Oct 11 2022 Alexandra Hájková - 12.1-6
+- Backport upstream patch "Add support for readline 8.2". (Andreas Schwab)
 
-* Mon Aug 09 2021 Mohan Boddu <mboddu@redhat.com> - 10.2-8.el9
-- Rebuilt for IMA sigs, glibc 2.34, aarch64 flags
-  Related: rhbz#1991688
+* Fri Oct 7 2022 Alexandra Hájková - 12.1-6
+- Update gdb-6.6-buildid-locate.patch to fix RHBZ 2122947.
 
-* Wed Jul 28 2021 Keith Seitz <keiths@redhat.com> - 10.2-7.el9
-- Disable compile feature on RHEL9; remove gcc-gdb-plugin requirements.
+* Thu Jul 28 2022 Amit Shah <amitshah@fedoraproject.org> 
+- Use the dist_name macro to identify the distribution
 
-* Mon Jun 28 2021 Keith Seitz <keiths@redhat.com> - 10.2-6.el9
-- Backport "PowerPC remove 512 bytes region limit if 2nd DAWR is available"
-  (Rogerio Alves, RHBZ 1870029)
-- Backport patches for "Support prefixed instructions in GDB"
-  (Will Schmidt and Luis Machado, RHBZ 1870031)
+* Thu Jul 21 2022 Fedora Release Engineering <releng@fedoraproject.org>
+- Rebuilt for https://fedoraproject.org/wiki/Fedora_37_Mass_Rebuild
 
-* Fri Jun 25 2021 Keith Seitz <keiths@redhat.com> - 10.2-5.el9
-- Backport five patches to support glibc 2.34 with merged libpthread.
-  (Simon Marchi and Kevin Buettner, RH BZ 1971095)
+* Mon Jun 13 2022 Python Maint <python-maint@redhat.com>
+- Rebuilt for Python 3.11
 
-* Thu Jun 10 2021 Keith Seitz <keiths@redhat.com> - 10.2-4.el8
-- Backport "Fix gdb.fortran/array-slices.exp with -m32"
-  (Tom de Vries, testsuite/269970)
-- Backport "adjust gdb.python/flexible-array-member.exp expected pattern"
-  (Simon Marchi)
+* Mon Jun 13 2022 Python Maint <python-maint@redhat.com> - 12.1-2
+- Bootstrap for Python 3.11
 
-* Fri Jun  4 2021 Keith Seitz <keiths@redhat.com> - 10.2-3.el8
-- Backport "Exclude debuginfo files from 'outside ELF segments' warning".
-  (Keith Seitz, RH BZ 1898252)
-- Backport "Correct recording of 'store on condition' insns"
-  (Andreas Arnez, RH BZ 1903375)
+* Thu May 12 2022 Kevin Buettner - 12.1-1
+- Rebase to FSF GDB 12.1.
+- Update gdb-6.6-buildid-locate.patch.
+- Update gdb-6.6-buildid-locate-rpm.patch.
+- Dropped backported patches from GDB 11.1 and 11.2.
 
-* Thu May 27 2021 Keith Seitz <keiths@redhat.com> - 10.2-2
-- Backport "Correct recording of 'store on condition' insns"
-  (Andreas Arnaz, RH BZ 1903375)
+* Wed Mar 30 2022 Kevin Buettner - 11.2-3
+- Backport upstream patch which removes sizes from debuginfod download
+  messages when the size is not available (RHBZ 2068280, Aaron Merey).
+
+* Wed Feb 9 2022 Kevin Buettner - 11.2-2
+- On ix86, add -Wno-format-overflow to --enable-gdb-build-warnings. 
+  (This is a workaround for the bogus warning/error that we now see
+  on i686 regarding a "may write a terminating nul past the end of
+  the destination" message for the sprintf() call in
+  global_symbol_searcher::search() in gdb/symtab.c.)
+
+* Wed Feb 9 2022 Kevin Buettner - 11.2-1
+- Rebase to FSF GDB 11.2.
+
+* Mon Jan 31 2022 Kevin Buettner <kevinb@redhat.com> - 11.1-12
+- Fix "sect_index_data not initialized" internal error. (RHBZ 2042664,
+  Kevin Buettner).
+
+* Mon Jan 31 2022 Keith Seitz <keiths@redhat.com> - 11.1-11
+- Fix buld issues. (RHBZ 2042257, Keith Seitz, Andrew Burgess)
+- Update libipt to 2.0.5.
+
+* Thu Jan 20 2022 Fedora Release Engineering <releng@fedoraproject.org>
+- Rebuilt for https://fedoraproject.org/wiki/Fedora_36_Mass_Rebuild
+
+* Wed Jan 12 2022 Alexandra Hájková - 11.1-9
+- Remove gdb-6.3-inferior-notification-20050721.patch
+  which adds problematic attach-32 test.
+
+* Tue Jan 11 2022 Alexandra Hájková - 11.1-8
+- Backport upstream patch "[PR gdb/27026] CTRL-C is ignored
+  when debug info is downloaded" (RHBZ 2024875, Aaron Merey).
+
+* Tue Jan 11 2022 Alexandra Hájková - 11.1-8
+- Backport upstream patch "rework "set debuginfod" commands"
+  (RHBZ 2024875, Simon Marchi).
+
+* Tue Jan 11 2022 Alexandra Hájková - 11.1-8
+- Backport upstream patch "Fix unittest.exp failure due to 'set debuginfod' addition"
+  (RHBZ 2024875, Tom Tromey).
+
+* Mon Jan 10 2022 Alexandra Hájková - 11.1-8
+- Add -Wno-unused-function to --enable-gdb-build-warnings to prevent the build failure:
+  "../../gdb/c-exp.y:3455:1: error: 'void c_print_token(FILE*, int, YYSTYPE)'
+  defined but not used [-Werror=unused-function]"
+
+* Mon Jan 10 2022 Alexandra Hájková - 11.1-8
+- Backport upstream patch "gdb: add set/show commands for managing debuginfod"
+  (RHBZ 2024875, Aaron Merey).
+
+* Mon Jan 10 2022 Alexandra Hájková - 11.1-8
+- Backport upstream patch "gdb.texinfo: Expand documentation for debuginfod"
+  (RHBZ 2024875, Aaron Merey).
+
+* Mon Dec 6 2021 Kevin Buettner - 11.1-7
+- Add -Wno-deprecated-declarations to --enable-gdb-build-warnings to work
+  around the python 3.11 deprecation of Py_SetProgramName.
+
+* Fri Nov 12 2021 Timm Bäder <tbaeder@redhat.com> - 11.1-6
+- Use %%set_build_flags to populate all relevant build flags
+
+* Wed Nov 10 2021 Kevin Buettner - 11.1-5
+- Backport upstream fix and test case for a dprintf bug (RHBZ 2022177, Kevin
+  Buettner).
+
+* Tue Nov 9 2021 Bruno Larsen - 11.1-4
+- Backport manpage update to be closer to -help (RHBZ 853071)
+
+* Wed Nov 3 2021 Kevin Buettner - 11.1-3
+- Make adjustments to gdb-6.6-buildid-locate.patch, provided by Tom de Vries.
+
+* Mon Oct 11 2021 Kevin Buettner - 11.1-2
+- Backport upstream patch which papers over Fortran lexical analyzer
+  bug (RHBZ 2012976, Tom de Vries).
+
+* Mon Oct 04 2021 Kevin Buettner - 11.1-1
+- Rebase to FSF GDB 11.1.
+- Adjust build-id related patches.
+- Drop backported patches which are no longer relevant.
+- Bump 'snapgnulib' date.
+
+* Thu Sep 30 2021 Alexandra Hájková <ahajkova@redhat.com> - 10.2-9
+- Backport test for RHBZ 1976887 (Kevin Buettner).
+
+* Thu Sep 30 2021 Alexandra Hájková <ahajkova@redhat.com> - 10.2-9
+- Backport upstream patch which fixes internal-error: Unexpected
+  type field location kind (RHBZ 1976887, Alexandra Hájková).
+
+* Wed Sep 22 2021 Bruno Larsen <blarsen@redhat.com> - 10.2-8
+- Backport "[gdb] Improve early exits for env var in debuginfod-support.c"
+  (Tom de Vries)
+
+* Wed Sep 22 2021 Bruno Larsen <blarsen@redhat.com> - 10.2-8
+- Backport "[gdb/cli] Don't assert on empty string for core-file"
+  (Tom de Vries)
+
+* Tue Sep 21 2021 Peter Robinson <pbrobinson@fedoraproject.org> 10.2-7
+- Use guile 2.2 (rhbz #1901353)
+
+* Wed Jul 21 2021 Fedora Release Engineering <releng@fedoraproject.org> 10.2-6
+- Rebuilt for https://fedoraproject.org/wiki/Fedora_35_Mass_Rebuild
+
+* Tue Jul 20 2021 Kevin Buettner <kevinb@redhat.com> - 10.2-5
+- Remove autoconf invocations from spec file.
+- Remove BuildRequires: autoconf.
+
+* Mon Jun 14 2021 Kevin Buettner <kevinb@redhat.com> - 10.2-4
+- Backport upstream patches which fix multi-threaded debugging for
+  glibc-2.34 (RHBZ 1971096, Simon Marchi, Kevin Buettner).
+
+* Fri Jun 11 2021 Keith Seitz <keiths@redhat.com> - 10.2-3
 - Backport "Exclude debuginfo files from 'outside ELF segments' warning".
   (Keith Seitz, RH BZ 1898252)
 - Backport "Fix crash when expanding partial symtab..."
   (Tom Tromey. gdb/27743)
+- Backport "[gdb/server] Don't overwrite fs/gs_base with -m32"
+- (Tom de Vries)
 
-* Tue May 25 2021 Kevin Buettner <kevinb@redhat.com> - 10.2-1
+* Sun Jun 06 2021 Python Maint <python-maint@redhat.com>
+- Rebuilt for Python 3.10
+
+* Thu Jun 03 2021 Kevin Buettner <kevinb@redhat.com> - 10.2-1
 - Rebase to FSF GDB 10.2.
 - Drop gdb-6.3-test-pie-20050107.patch.
 - Drop gdb-6.3-test-self-20050110.patch.
@@ -1274,60 +1817,60 @@ fi
   gdb-rhbz1964167-fortran-whitespace_array.patch
   gdb-rhbz1964167-move-fortran-expr-handling.patch
 
-* Wed Mar 31 2021 Keith Seitz <keiths@redhat.com> - 10.1-14
+* Tue Jun 01 2021 Python Maint <python-maint@redhat.com>
+- Bootstrap for Python 3.10
+
+* Wed Mar 31 2021 Keith Seitz <keiths@redhat.com> - 10.1-18
 - Backport "Save/restore file offset while reading notes in core file"
   (Keith Seitz, RHBZ 1931344)
 
-* Tue Mar 30 2021 Jonathan Wakely <jwakely@redhat.com> - 10.1-13
-- Rebuilt for removed libstdc++ symbol (#1937698)
+* Wed Mar 31 2021 Jonathan Wakely <jwakely@redhat.com> - 10.1-17
+- Rebuilt for removed libstdc++ symbols (#1937698)
 
 * Tue Mar 23 2021 Kevin Buettner <kevinb@redhat.com>
 -  Remove spec file workaround for RHBZ 1912913.
 
-* Fri Mar 19 2021 Kevin Buettner <kevinb@redhat.com> - 10.1-12
+* Fri Mar 19 2021 Kevin Buettner <kevinb@redhat.com> - 10.1-16
 - Fix potential hang during gdbserver testing (RHBZ 1941080, Kevin Buettner).
 
-* Thu Mar 18 2021 Keith Seitz <keiths@redhat.com> - 10.1-11
+* Thu Mar 18 2021 Keith Seitz <keiths@redhat.com>
 - Disable libctf on RHEL (RHBZ 1935517).
 
-* Thu Mar 11 2021 Kevin Buettner <kevinb@redhat.com> - 10.1-10
+* Thu Mar 11 2021 Kevin Buettner <kevinb@redhat.com> - 10.1-15
 - Update libipt to version 2.0.4.
 
-* Fri Mar 05 2021 Kevin Buettner <kevinb@redhat.com> - 10.1-9
+* Fri Mar 05 2021 Kevin Buettner <kevinb@redhat.com> - 10.1-14
 - Backport patches which fix frame_id_p assertion failure (RHBZ 1909902,
   Pedro Alves).
 
-* Fri Mar  5 2021 Jan Kratochvil <jan.kratochvil@redhat.com> - 10.1-8
+* Fri Mar  5 2021 Jan Kratochvil <jan.kratochvil@redhat.com> - 10.1-13
 - Drop gdb-vla-intel-fortran-vla-strings.patch as it was still regressing the
   testsuite.
 
-* Thu Mar  4 2021 Jan Kratochvil <jan.kratochvil@redhat.com>
+* Thu Mar  4 2021 Jan Kratochvil <jan.kratochvil@redhat.com> - 10.1-12
 - Fix gdb-vla-intel-fortran-vla-strings.patch to no longer modify cached
   inferior types.
 
-* Thu Mar  4 2021 Jan Kratochvil <jan.kratochvil@redhat.com>
+* Thu Mar  4 2021 Jan Kratochvil <jan.kratochvil@redhat.com> - 10.1-11
 - Align gdb-vla-intel-fortran-vla-strings.patch more to upstream
   fixing whitespaces in Fortran types printing.
 
-* Thu Mar  4 2021 Jan Kratochvil <jan.kratochvil@redhat.com>
-- Reapply 10.1-8 after it has been accidentally reverted by 10.1-7.
+* Thu Mar  4 2021 Jan Kratochvil <jan.kratochvil@redhat.com> - 10.1-10
+- Reapply 10.1-8 after it has been accidentally reverted by 10.1-9.
 
-* Wed Feb 24 2021 Kevin Buettner <kevinb@redhat.com> - 10.1-7
+* Wed Feb 24 2021 Kevin Buettner <kevinb@redhat.com> - 10.1-9
 - Fix aarch64 build problem (RHBZ 1932645, Kevin Buettner).
 
-* Fri Feb 19 2021 Jan Kratochvil <jan.kratochvil@redhat.com>
+* Fri Feb 19 2021 Jan Kratochvil <jan.kratochvil@redhat.com> - 10.1-8
 - Fix gdb-vla-intel-fortran-vla-strings.patch for compatiblity with GraalVM.
 
-* Thu Feb 18 2021 Kevin Buettner <kevinb@redhat.com>
+* Thu Feb 18 2021 Kevin Buettner <kevinb@redhat.com> - 10.1-7
 - Fix gnulib related build problem (RHBZ 1930528, Kevin Buettner).
 
-* Wed Feb 17 2021 Kevin Buettner <kevinb@redhat.com>
+* Wed Feb 17 2021 Kevin Buettner <kevinb@redhat.com> - 10.1-6
 - Fix libstdc++ assert when performing tab completion; build must be made
   with -D_GLIBCXX_DEBUG flag in order to trigger assert (RHBZ 1912985,
   Kevin Buettner).
-
-* Wed Feb 17 2021 Keith Seitz <keiths@redhat.com> - 10.1-6
-- NVR bump to disable guile support.
 
 * Thu Feb 11 2021 Keith Seitz
 - Disable Guile support for RHEL9+.

@@ -9,7 +9,7 @@ Subject: gdb-6.6-buildid-locate.patch
 diff --git a/bfd/libbfd-in.h b/bfd/libbfd-in.h
 --- a/bfd/libbfd-in.h
 +++ b/bfd/libbfd-in.h
-@@ -121,7 +121,7 @@ static inline char *
+@@ -110,7 +110,7 @@ static inline char *
  bfd_strdup (const char *str)
  {
    size_t len = strlen (str) + 1;
@@ -21,7 +21,7 @@ diff --git a/bfd/libbfd-in.h b/bfd/libbfd-in.h
 diff --git a/bfd/libbfd.h b/bfd/libbfd.h
 --- a/bfd/libbfd.h
 +++ b/bfd/libbfd.h
-@@ -126,7 +126,7 @@ static inline char *
+@@ -116,7 +116,7 @@ static inline char *
  bfd_strdup (const char *str)
  {
    size_t len = strlen (str) + 1;
@@ -33,7 +33,7 @@ diff --git a/bfd/libbfd.h b/bfd/libbfd.h
 diff --git a/gdb/build-id.c b/gdb/build-id.c
 --- a/gdb/build-id.c
 +++ b/gdb/build-id.c
-@@ -24,13 +24,70 @@
+@@ -24,14 +24,72 @@
  #include "gdbsupport/gdb_vecs.h"
  #include "symfile.h"
  #include "objfiles.h"
@@ -46,6 +46,8 @@ diff --git a/gdb/build-id.c b/gdb/build-id.c
 +#include "gdb_bfd.h"
 +#include "gdbcmd.h"
  #include "gdbcore.h"
+ #include "cli/cli-style.h"
++#include "inferior.h"
 +#include "objfiles.h"
 +#include "observable.h"
 +#include "symfile.h"
@@ -58,8 +60,8 @@ diff --git a/gdb/build-id.c b/gdb/build-id.c
 +show_build_id_verbose (struct ui_file *file, int from_tty,
 +		       struct cmd_list_element *c, const char *value)
 +{
-+  fprintf_filtered (file, _("Verbosity level of the build-id locator is %s.\n"),
-+		    value);
++  gdb_printf (file, _("Verbosity level of the build-id locator is %s.\n"),
++	      value);
 +}
 +/* Locate NT_GNU_BUILD_ID and return its matching debug filename.
 +   FIXME: NOTE decoding should be unified with the BFD core notes decoding.  */
@@ -103,9 +105,9 @@ diff --git a/gdb/build-id.c b/gdb/build-id.c
 -build_id_bfd_get (bfd *abfd)
 +build_id_bfd_shdr_get (bfd *abfd)
  {
-   if (!bfd_check_format (abfd, bfd_object)
-       && !bfd_check_format (abfd, bfd_core))
-@@ -43,6 +100,348 @@ build_id_bfd_get (bfd *abfd)
+   /* Dynamic objfiles such as ones created by JIT reader API
+      have no underlying bfd structure (that is, objfile->obfd
+@@ -50,6 +108,348 @@ build_id_bfd_get (bfd *abfd)
    return NULL;
  }
  
@@ -454,7 +456,7 @@ diff --git a/gdb/build-id.c b/gdb/build-id.c
  /* See build-id.h.  */
  
  int
-@@ -51,7 +450,7 @@ build_id_verify (bfd *abfd, size_t check_len, const bfd_byte *check)
+@@ -58,7 +458,7 @@ build_id_verify (bfd *abfd, size_t check_len, const bfd_byte *check)
    const struct bfd_build_id *found;
    int retval = 0;
  
@@ -463,14 +465,15 @@ diff --git a/gdb/build-id.c b/gdb/build-id.c
  
    if (found == NULL)
      warning (_("File \"%s\" has no build-id, file skipped"),
-@@ -66,56 +465,159 @@ build_id_verify (bfd *abfd, size_t check_len, const bfd_byte *check)
+@@ -73,63 +473,166 @@ build_id_verify (bfd *abfd, size_t check_len, const bfd_byte *check)
    return retval;
  }
  
 +static char *
 +link_resolve (const char *symlink, int level)
 +{
-+  char buf[PATH_MAX + 1], *target, *retval;
++  char buf[PATH_MAX + 1], *retval;
++  gdb::unique_xmalloc_ptr<char> target;
 +  ssize_t got;
 +
 +  if (level > 10)
@@ -482,7 +485,7 @@ diff --git a/gdb/build-id.c b/gdb/build-id.c
 +  buf[got] = '\0';
 +
 +  if (IS_ABSOLUTE_PATH (buf))
-+    target = xstrdup (buf);
++    target = make_unique_xstrdup (buf);
 +  else
 +    {
 +      const std::string dir (ldirname (symlink));
@@ -496,8 +499,7 @@ diff --git a/gdb/build-id.c b/gdb/build-id.c
 +			   "%s", dir.c_str(), buf);
 +    }
 +
-+  retval = link_resolve (target, level + 1);
-+  xfree (target);
++  retval = link_resolve (target.get (), level + 1);
 +  return retval;
 +}
 +
@@ -516,42 +518,49 @@ diff --git a/gdb/build-id.c b/gdb/build-id.c
 +
    if (separate_debug_file_debug)
      {
--      printf_unfiltered (_("  Trying %s..."), link.c_str ());
-+      printf_unfiltered (_("  Trying %s..."), orig_link.c_str ());
-       gdb_flush (gdb_stdout);
+-      gdb_printf (gdb_stdlog, _("  Trying %s..."), link.c_str ());
+-      gdb_flush (gdb_stdlog);
++      gdb_printf (gdb_stdlog, _("  Trying %s..."), orig_link.c_str ());
++      gdb_flush (gdb_stdout);
      }
  
 -  /* lrealpath() is expensive even for the usually non-existent files.  */
--  gdb::unique_xmalloc_ptr<char> filename;
--  if (access (link.c_str (), F_OK) == 0)
--    filename.reset (lrealpath (link.c_str ()));
--
--  if (filename == NULL)
+-  gdb::unique_xmalloc_ptr<char> filename_holder;
+-  const char *filename = nullptr;
+-  if (startswith (link, TARGET_SYSROOT_PREFIX))
+-    filename = link.c_str ();
+-  else if (access (link.c_str (), F_OK) == 0)
 +  for (unsigned seqno = 0;; seqno++)
      {
--      if (separate_debug_file_debug)
--	printf_unfiltered (_(" no, unable to compute real path\n"));
+-      filename_holder.reset (lrealpath (link.c_str ()));
+-      filename = filename_holder.get ();
+-    }
 +      std::string link = orig_link;
  
--      return {};
--    }
+-  if (filename == NULL)
+-    {
+-      if (separate_debug_file_debug)
+-	gdb_printf (gdb_stdlog,
+-		    _(" no, unable to compute real path\n"));
 +      if (seqno > 0)
 +	{
 +	  /* There can be multiple build-id symlinks pointing to real files
 +	     with the same build-id (such as hard links).  Some of the real
 +	     files may not be installed.  */
-+
+ 
+-      return {};
+-    }
 +	  string_appendf (link, ".%u", seqno);
 +	}
  
 -  /* We expect to be silent on the non-existing files.  */
--  gdb_bfd_ref_ptr debug_bfd = gdb_bfd_open (filename.get (), gnutarget);
+-  gdb_bfd_ref_ptr debug_bfd = gdb_bfd_open (filename, gnutarget);
 +      ret_link = link;
  
 -  if (debug_bfd == NULL)
 -    {
 -      if (separate_debug_file_debug)
--	printf_unfiltered (_(" no, unable to open.\n"));
+-	gdb_printf (gdb_stdlog, _(" no, unable to open.\n"));
 +      struct stat statbuf_trash;
 +
 +      /* `access' automatically dereferences LINK.  */
@@ -562,35 +571,42 @@ diff --git a/gdb/build-id.c b/gdb/build-id.c
 +	}
 +
 +      /* lrealpath() is expensive even for the usually non-existent files.  */
-+      gdb::unique_xmalloc_ptr<char> filename;
-+
-+      if (access (link.c_str (), F_OK) == 0)
-+	filename.reset (lrealpath (link.c_str ()));
++      gdb::unique_xmalloc_ptr<char> filename_holder;
++      const char *filename = nullptr;
++      if (startswith (link, TARGET_SYSROOT_PREFIX))
++	filename = link.c_str ();
++      else if (access (link.c_str (), F_OK) == 0)
++	{
++	  filename_holder.reset (lrealpath (link.c_str ()));
++	  filename = filename_holder.get ();
++	}
 +
 +      if (filename == NULL)
 +	{
 +	  if (separate_debug_file_debug)
-+	    printf_unfiltered (_(" no, unable to compute real path\n"));
++	    gdb_printf (gdb_stdlog,
++	                       _(" no, unable to compute real path\n"));
 +
 +	  continue;
 +	}
 +
 +      /* We expect to be silent on the non-existing files.  */
-+      gdb_bfd_ref_ptr debug_bfd = gdb_bfd_open (filename.get (), gnutarget, -1);
- 
--      return {};
++      gdb_bfd_ref_ptr debug_bfd = gdb_bfd_open (filename, gnutarget);
++
 +      if (debug_bfd == NULL)
 +	{
 +	  if (separate_debug_file_debug)
-+	    printf_unfiltered (_(" no, unable to open.\n"));
-+
++	    gdb_printf (gdb_stdlog, _(" no, unable to open.\n"));
+ 
+-      return {};
 +	  continue;
 +	}
 +
 +      if (!build_id_verify (debug_bfd.get(), build_id_len, build_id))
 +	{
 +	  if (separate_debug_file_debug)
-+	    printf_unfiltered (_(" no, build-id does not match.\n"));
++	    gdb_printf (gdb_stdlog,
++	                _(" no, build-id does not match.\n"));
 +
 +	  continue;
 +	}
@@ -605,17 +621,16 @@ diff --git a/gdb/build-id.c b/gdb/build-id.c
 +  if (ret_bfd != NULL)
      {
        if (separate_debug_file_debug)
--	printf_unfiltered (_(" no, build-id does not match.\n"));
--
--      return {};
-+	printf_unfiltered (_(" yes!\n"));
+-	gdb_printf (gdb_stdlog, _(" no, build-id does not match.\n"));
++	gdb_printf (gdb_stdlog, _(" yes!\n"));
 +    }
 +  else
 +    {
 +      /* If none of the real files is found report as missing file
 +	 always the non-.%u-suffixed file.  */
 +      std::string link0 = orig_link;
-+
+ 
+-      return {};
 +      /* If the symlink has target request to install the target.
 +	 BASE-debuginfo.rpm contains the symlink but BASE.rpm may be missing.
 +	 https://bugzilla.redhat.com/show_bug.cgi?id=981154  */
@@ -632,7 +647,7 @@ diff --git a/gdb/build-id.c b/gdb/build-id.c
      }
  
 -  if (separate_debug_file_debug)
--    printf_unfiltered (_(" yes!\n"));
+-    gdb_printf (gdb_stdlog, _(" yes!\n"));
 +  if (link_return != NULL)
 +    {
 +      if (ret_bfd != NULL)
@@ -650,7 +665,7 @@ diff --git a/gdb/build-id.c b/gdb/build-id.c
  }
  
  /* Common code for finding BFDs of a given build-id.  This function
-@@ -124,7 +626,7 @@ build_id_to_debug_bfd_1 (const std::string &link, size_t build_id_len,
+@@ -138,7 +641,7 @@ build_id_to_debug_bfd_1 (const std::string &link, size_t build_id_len,
  
  static gdb_bfd_ref_ptr
  build_id_to_bfd_suffix (size_t build_id_len, const bfd_byte *build_id,
@@ -659,7 +674,7 @@ diff --git a/gdb/build-id.c b/gdb/build-id.c
  {
    /* Keep backward compatibility so that DEBUG_FILE_DIRECTORY being "" will
       cause "/.build-id/..." lookups.  */
-@@ -147,16 +649,17 @@ build_id_to_bfd_suffix (size_t build_id_len, const bfd_byte *build_id,
+@@ -161,16 +664,17 @@ build_id_to_bfd_suffix (size_t build_id_len, const bfd_byte *build_id,
        if (size > 0)
  	{
  	  size--;
@@ -680,17 +695,16 @@ diff --git a/gdb/build-id.c b/gdb/build-id.c
        if (debug_bfd != NULL)
  	return debug_bfd;
  
-@@ -170,7 +673,8 @@ build_id_to_bfd_suffix (size_t build_id_len, const bfd_byte *build_id,
-       if (strcmp (gdb_sysroot, TARGET_SYSROOT_PREFIX) != 0)
+@@ -181,7 +685,7 @@ build_id_to_bfd_suffix (size_t build_id_len, const bfd_byte *build_id,
+       if (!gdb_sysroot.empty ())
  	{
  	  link = gdb_sysroot + link;
 -	  debug_bfd = build_id_to_debug_bfd_1 (link, build_id_len, build_id);
-+	  debug_bfd = build_id_to_debug_bfd_1 (link, build_id_len, build_id,
-+					       link_return);
++	  debug_bfd = build_id_to_debug_bfd_1 (link, build_id_len, build_id, NULL);
  	  if (debug_bfd != NULL)
  	    return debug_bfd;
  	}
-@@ -179,38 +683,208 @@ build_id_to_bfd_suffix (size_t build_id_len, const bfd_byte *build_id,
+@@ -190,31 +694,663 @@ build_id_to_bfd_suffix (size_t build_id_len, const bfd_byte *build_id,
    return {};
  }
  
@@ -708,8 +722,448 @@ diff --git a/gdb/build-id.c b/gdb/build-id.c
 +  return result;
 +}
 +
++void debug_flush_missing (void);
++
++#ifdef HAVE_LIBRPM
++
++#include <rpm/rpmlib.h>
++#include <rpm/rpmts.h>
++#include <rpm/rpmdb.h>
++#include <rpm/header.h>
++#ifdef DLOPEN_LIBRPM
++#include <dlfcn.h>
++#endif
++
++/* Workarodun https://bugzilla.redhat.com/show_bug.cgi?id=643031
++   librpm must not exit() an application on SIGINT
++
++   Enable or disable a signal handler.  SIGNUM: signal to enable (or disable
++   if negative).  HANDLER: sa_sigaction handler (or NULL to use
++   rpmsqHandler()).  Returns: no. of refs, -1 on error.  */
++extern int rpmsqEnable (int signum, /* rpmsqAction_t handler */ void *handler);
++int
++rpmsqEnable (int signum, /* rpmsqAction_t handler */ void *handler)
++{
++  return 0;
++}
++
++/* This MISSING_RPM_HASH tracker is used to collect all the missing rpm files
++   and avoid their duplicities during a single inferior run.  */
++
++static struct htab *missing_rpm_hash;
++
++/* This MISSING_RPM_LIST tracker is used to collect and print as a single line
++   all the rpms right before the nearest GDB prompt.  It gets cleared after
++   each such print (it is questionable if we should clear it after the print).
++   */
++
++struct missing_rpm
++  {
++    struct missing_rpm *next;
++    char rpm[1];
++  };
++static struct missing_rpm *missing_rpm_list;
++static int missing_rpm_list_entries;
++
++/* Returns the count of newly added rpms.  */
++
++static int
++#ifndef GDB_INDEX_VERIFY_VENDOR
++missing_rpm_enlist (const char *filename)
++#else
++missing_rpm_enlist_1 (const char *filename, int verify_vendor)
++#endif
++{
++  static int rpm_init_done = 0;
++  rpmts ts;
++  rpmdbMatchIterator mi;
++  int count = 0;
++
++#ifdef DLOPEN_LIBRPM
++  /* Duplicate here the declarations to verify they match.  The same sanity
++     check is present also in `configure.ac'.  */
++  extern char * headerFormat(Header h, const char * fmt, errmsg_t * errmsg);
++  static char *(*headerFormat_p) (Header h, const char * fmt, errmsg_t *errmsg);
++  extern int rpmReadConfigFiles(const char * file, const char * target);
++  static int (*rpmReadConfigFiles_p) (const char * file, const char * target);
++  extern rpmdbMatchIterator rpmdbFreeIterator(rpmdbMatchIterator mi);
++  static rpmdbMatchIterator (*rpmdbFreeIterator_p) (rpmdbMatchIterator mi);
++  extern Header rpmdbNextIterator(rpmdbMatchIterator mi);
++  static Header (*rpmdbNextIterator_p) (rpmdbMatchIterator mi);
++  extern rpmts rpmtsCreate(void);
++  static rpmts (*rpmtsCreate_p) (void);
++  extern rpmts rpmtsFree(rpmts ts);
++  static rpmts (*rpmtsFree_p) (rpmts ts);
++  extern rpmdbMatchIterator rpmtsInitIterator(const rpmts ts, rpmTag rpmtag,
++                                              const void * keyp, size_t keylen);
++  static rpmdbMatchIterator (*rpmtsInitIterator_p) (const rpmts ts,
++						    rpmTag rpmtag,
++						    const void *keyp,
++						    size_t keylen);
++#else	/* !DLOPEN_LIBRPM */
++# define headerFormat_p headerFormat
++# define rpmReadConfigFiles_p rpmReadConfigFiles
++# define rpmdbFreeIterator_p rpmdbFreeIterator
++# define rpmdbNextIterator_p rpmdbNextIterator
++# define rpmtsCreate_p rpmtsCreate
++# define rpmtsFree_p rpmtsFree
++# define rpmtsInitIterator_p rpmtsInitIterator
++#endif	/* !DLOPEN_LIBRPM */
++
++  gdb_assert (filename != NULL);
++
++  if (strcmp (filename, BUILD_ID_MAIN_EXECUTABLE_FILENAME) == 0)
++    return 0;
++
++  if (is_target_filename (filename))
++    return 0;
++
++  if (filename[0] != '/')
++    {
++      warning (_("Ignoring non-absolute filename: <%s>"), filename);
++      return 0;
++    }
++
++  if (!rpm_init_done)
++    {
++      static int init_tried;
++
++      /* Already failed the initialization before?  */
++      if (init_tried)
++        return 0;
++      init_tried = 1;
++
++#ifdef DLOPEN_LIBRPM
++      {
++	void *h;
++
++	h = dlopen (DLOPEN_LIBRPM, RTLD_LAZY);
++	if (!h)
++	  {
++	    warning (_("Unable to open \"%s\" (%s), "
++		      "missing debuginfos notifications will not be displayed"),
++		     DLOPEN_LIBRPM, dlerror ());
++	    return 0;
++	  }
++
++	if (!((headerFormat_p = (char *(*) (Header h, const char * fmt, errmsg_t *errmsg)) dlsym (h, "headerFormat"))
++	      && (rpmReadConfigFiles_p = (int (*) (const char * file, const char * target)) dlsym (h, "rpmReadConfigFiles"))
++	      && (rpmdbFreeIterator_p = (rpmdbMatchIterator (*) (rpmdbMatchIterator mi)) dlsym (h, "rpmdbFreeIterator"))
++	      && (rpmdbNextIterator_p = (Header (*) (rpmdbMatchIterator mi)) dlsym (h, "rpmdbNextIterator"))
++	      && (rpmtsCreate_p = (rpmts (*) (void)) dlsym (h, "rpmtsCreate"))
++	      && (rpmtsFree_p = (rpmts (*) (rpmts ts)) dlsym (h, "rpmtsFree"))
++	      && (rpmtsInitIterator_p = (rpmdbMatchIterator (*) (const rpmts ts, rpmTag rpmtag, const void *keyp, size_t keylen)) dlsym (h, "rpmtsInitIterator"))))
++	  {
++	    warning (_("Opened library \"%s\" is incompatible (%s), "
++		      "missing debuginfos notifications will not be displayed"),
++		     DLOPEN_LIBRPM, dlerror ());
++	    if (dlclose (h))
++	      warning (_("Error closing library \"%s\": %s\n"), DLOPEN_LIBRPM,
++		       dlerror ());
++	    return 0;
++	  }
++      }
++#endif	/* DLOPEN_LIBRPM */
++
++      if (rpmReadConfigFiles_p (NULL, NULL) != 0)
++	{
++	  warning (_("Error reading the rpm configuration files"));
++	  return 0;
++	}
++
++      rpm_init_done = 1;
++    }
++
++  ts = rpmtsCreate_p ();
++
++  mi = rpmtsInitIterator_p (ts, RPMTAG_BASENAMES, filename, 0);
++  if (mi != NULL)
++    {
++#ifndef GDB_INDEX_VERIFY_VENDOR
++      for (;;)
++#else
++      if (!verify_vendor) for (;;)
++#endif
++	{
++	  Header h;
++	  char *debuginfo, **slot, *s, *s2;
++	  errmsg_t err;
++	  size_t srcrpmlen = sizeof (".src.rpm") - 1;
++	  size_t debuginfolen = sizeof ("-debuginfo") - 1;
++	  rpmdbMatchIterator mi_debuginfo;
++
++	  h = rpmdbNextIterator_p (mi);
++	  if (h == NULL)
++	    break;
++
++	  /* Verify the debuginfo file is not already installed.  */
++
++	  debuginfo = headerFormat_p (h, "%{sourcerpm}-debuginfo.%{arch}",
++				      &err);
++	  if (!debuginfo)
++	    {
++	      warning (_("Error querying the rpm file `%s': %s"), filename,
++	               err);
++	      continue;
++	    }
++	  /* s = `.src.rpm-debuginfo.%{arch}' */
++	  s = strrchr (debuginfo, '-') - srcrpmlen;
++	  s2 = NULL;
++	  if (s > debuginfo && memcmp (s, ".src.rpm", srcrpmlen) == 0)
++	    {
++	      /* s2 = `-%{release}.src.rpm-debuginfo.%{arch}' */
++	      s2 = (char *) memrchr (debuginfo, '-', s - debuginfo);
++	    }
++	  if (s2)
++	    {
++	      /* s2 = `-%{version}-%{release}.src.rpm-debuginfo.%{arch}' */
++	      s2 = (char *) memrchr (debuginfo, '-', s2 - debuginfo);
++	    }
++	  if (!s2)
++	    {
++	      warning (_("Error querying the rpm file `%s': %s"), filename,
++	               debuginfo);
++	      xfree (debuginfo);
++	      continue;
++	    }
++	  /* s = `.src.rpm-debuginfo.%{arch}' */
++	  /* s2 = `-%{version}-%{release}.src.rpm-debuginfo.%{arch}' */
++	  memmove (s2 + debuginfolen, s2, s - s2);
++	  memcpy (s2, "-debuginfo", debuginfolen);
++	  /* s = `XXXX.%{arch}' */
++	  /* strlen ("XXXX") == srcrpmlen + debuginfolen */
++	  /* s2 = `-debuginfo-%{version}-%{release}XX.%{arch}' */
++	  /* strlen ("XX") == srcrpmlen */
++	  memmove (s + debuginfolen, s + srcrpmlen + debuginfolen,
++		   strlen (s + srcrpmlen + debuginfolen) + 1);
++	  /* s = `-debuginfo-%{version}-%{release}.%{arch}' */
++
++	  /* RPMDBI_PACKAGES requires keylen == sizeof (int).  */
++	  /* RPMDBI_LABEL is an interface for NVR-based dbiFindByLabel().  */
++	  mi_debuginfo = rpmtsInitIterator_p (ts, (rpmTag) RPMDBI_LABEL, debuginfo, 0);
++	  xfree (debuginfo);
++	  if (mi_debuginfo)
++	    {
++	      rpmdbFreeIterator_p (mi_debuginfo);
++	      count = 0;
++	      break;
++	    }
++
++	  /* The allocated memory gets utilized below for MISSING_RPM_HASH.  */
++	  debuginfo = headerFormat_p (h,
++				      "%{name}-%{version}-%{release}.%{arch}",
++				      &err);
++	  if (!debuginfo)
++	    {
++	      warning (_("Error querying the rpm file `%s': %s"), filename,
++	               err);
++	      continue;
++	    }
++
++	  /* Base package name for `debuginfo-install'.  We do not use the
++	     `yum' command directly as the line
++		 yum --enablerepo='*debug*' install NAME-debuginfo.ARCH
++	     would be more complicated than just:
++		 debuginfo-install NAME-VERSION-RELEASE.ARCH
++	     Do not supply the rpm base name (derived from .src.rpm name) as
++	     debuginfo-install is unable to install the debuginfo package if
++	     the base name PKG binary rpm is not installed while for example
++	     PKG-libs would be installed (RH Bug 467901).
++	     FUTURE: After multiple debuginfo versions simultaneously installed
++	     get supported the support for the VERSION-RELEASE tags handling
++	     may need an update.  */
++
++	  if (missing_rpm_hash == NULL)
++	    {
++	      /* DEL_F is passed NULL as MISSING_RPM_LIST's HTAB_DELETE
++		 should not deallocate the entries.  */
++
++	      missing_rpm_hash = htab_create_alloc (64, htab_hash_string,
++			       (int (*) (const void *, const void *)) streq,
++						    NULL, xcalloc, xfree);
++	    }
++	  slot = (char **) htab_find_slot (missing_rpm_hash, debuginfo, INSERT);
++	  /* XCALLOC never returns NULL.  */
++	  gdb_assert (slot != NULL);
++	  if (*slot == NULL)
++	    {
++	      struct missing_rpm *missing_rpm;
++
++	      *slot = debuginfo;
++
++	      missing_rpm = (struct missing_rpm *) xmalloc (sizeof (*missing_rpm) + strlen (debuginfo));
++	      strcpy (missing_rpm->rpm, debuginfo);
++	      missing_rpm->next = missing_rpm_list;
++	      missing_rpm_list = missing_rpm;
++	      missing_rpm_list_entries++;
++	    }
++	  else
++	    xfree (debuginfo);
++	  count++;
++	}
++#ifdef GDB_INDEX_VERIFY_VENDOR
++      else /* verify_vendor */
++	{
++	  int vendor_pass = 0, vendor_fail = 0;
++
++	  for (;;)
++	    {
++	      Header h;
++	      errmsg_t err;
++	      char *vendor;
++
++	      h = rpmdbNextIterator_p (mi);
++	      if (h == NULL)
++		break;
++
++	      vendor = headerFormat_p (h, "%{vendor}", &err);
++	      if (!vendor)
++		{
++		  warning (_("Error querying the rpm file `%s': %s"), filename,
++			   err);
++		  continue;
++		}
++	      if (strcmp (vendor, "Red Hat, Inc.") == 0)
++		vendor_pass = 1;
++	      else
++		vendor_fail = 1;
++	      xfree (vendor);
++	    }
++	  count = vendor_pass != 0 && vendor_fail == 0;
++	}
++#endif
++
++      rpmdbFreeIterator_p (mi);
++    }
++
++  rpmtsFree_p (ts);
++
++  return count;
++}
++
++#ifdef GDB_INDEX_VERIFY_VENDOR
++missing_rpm_enlist (const char *filename)
++{
++  return missing_rpm_enlist_1 (filename, 0);
++}
++
++extern int rpm_verify_vendor (const char *filename);
++int
++rpm_verify_vendor (const char *filename)
++{
++  return missing_rpm_enlist_1 (filename, 1);
++}
++#endif
++
++static bool
++missing_rpm_list_compar (const char *ap, const char *bp)
++{
++  return strcoll (ap, bp) < 0;
++}
++
++/* It returns a NULL-terminated array of strings needing to be FREEd.  It may
++   also return only NULL.  */
++
++static void
++missing_rpm_list_print (void)
++{
++  struct missing_rpm *list_iter;
++
++  if (missing_rpm_list_entries == 0)
++    return;
++
++  std::vector<const char *> array (missing_rpm_list_entries);
++  size_t idx = 0;
++
++  for (list_iter = missing_rpm_list; list_iter != NULL;
++       list_iter = list_iter->next)
++    {
++      array[idx++] = list_iter->rpm;
++    }
++  gdb_assert (idx == missing_rpm_list_entries);
++
++  std::sort (array.begin (), array.end (), missing_rpm_list_compar);
++
++  /* We zero out the number of missing RPMs here because of a nasty
++     bug (see RHBZ 1801974).
++
++     When we call 'puts_unfiltered' below, if pagination is on and if
++     the number of missing RPMs is big enough to trigger pagination,
++     we will end up in an infinite recursion.  The call chain looks
++     like this:
++
++     missing_rpm_list_print -> puts_unfiltered -> fputs_maybe_filtered
++     -> prompt_for_continue -> display_gdb_prompt ->
++     debug_flush_missing -> missing_rpm_list_print ...
++
++     For this reason, we make sure MISSING_RPM_LIST_ENTRIES is zero
++     *before* calling any print function.
++     
++     Note: kevinb/2023-02-22: The code below used to call
++     puts_unfiltered() and printf_unfiltered(), but calls to these
++     functions have been replaced by calls to gdb_printf().  The call
++     chain shown above (probably) used to be the case at one time and
++     hopefully something similar is still the case now that
++     gdb_printf() is being used instead.  */
++  missing_rpm_list_entries = 0;
++
++  gdb_printf (_("Missing separate debuginfos, use: %s"),
++#ifdef DNF_DEBUGINFO_INSTALL
++		     "dnf "
++#endif
++		     "debuginfo-install");
++  for (const char *el : array)
++    {
++      gdb_printf (" %s", el);
++    }
++  gdb_printf ("\n");
++
++  while (missing_rpm_list != NULL)
++    {
++      list_iter = missing_rpm_list;
++      missing_rpm_list = list_iter->next;
++      xfree (list_iter);
++    }
++}
++
++static void
++missing_rpm_change (void)
++{
++  debug_flush_missing ();
++
++  gdb_assert (missing_rpm_list == NULL);
++  if (missing_rpm_hash != NULL)
++    {
++      htab_delete (missing_rpm_hash);
++      missing_rpm_hash = NULL;
++    }
++}
++
++enum missing_exec
++  {
++    /* Init state.  EXEC_BFD also still could be NULL.  */
++    MISSING_EXEC_NOT_TRIED,
++    /* We saw a non-NULL EXEC_BFD but RPM has no info about it.  */
++    MISSING_EXEC_NOT_FOUND,
++    /* We found EXEC_BFD by RPM and we either have its symbols (either embedded
++       or separate) or the main executable's RPM is now contained in
++       MISSING_RPM_HASH.  */
++    MISSING_EXEC_ENLISTED
++  };
++static enum missing_exec missing_exec = MISSING_EXEC_NOT_TRIED;
++
++#endif	/* HAVE_LIBRPM */
++
++void
++debug_flush_missing (void)
++{
++#ifdef HAVE_LIBRPM
++  missing_rpm_list_print ();
++#endif
++}
++
 +/* This MISSING_FILEPAIR_HASH tracker is used only for the duplicite messages
-+     Try to install the hash file ...
++     yum --enablerepo='*debug*' install ...
 +   avoidance.  */
 +
 +struct missing_filepair
@@ -763,11 +1217,17 @@ diff --git a/gdb/build-id.c b/gdb/build-id.c
 +      /* All their memory came just from missing_filepair_OBSTACK.  */
 +      missing_filepair_hash = NULL;
 +    }
++#ifdef HAVE_LIBRPM
++  missing_exec = MISSING_EXEC_NOT_TRIED;
++#endif
 +}
 +
 +static void
-+debug_print_executable_changed (void)
++debug_print_executable_changed (struct program_space *pspace, bool reload_p)
 +{
++#ifdef HAVE_LIBRPM
++  missing_rpm_change ();
++#endif
 +  missing_filepair_change ();
 +}
 +
@@ -834,14 +1294,43 @@ diff --git a/gdb/build-id.c b/gdb/build-id.c
 +
 +  *slot = missing_filepair;
 +
-+  /* We do not collect and flush these messages as each such message
-+     already requires its own separate lines.  */
++#ifdef HAVE_LIBRPM
++  if (missing_exec == MISSING_EXEC_NOT_TRIED)
++    {
++      const char *execfilename = get_exec_file (0);
 +
-+  fprintf_unfiltered (gdb_stdlog,
-+		      _("Missing separate debuginfo for %s\n"), binary);
-+  if (debug != NULL)
-+    fprintf_unfiltered (gdb_stdlog, _("Try to install the hash file %s\n"),
-+			debug);
++      if (execfilename != NULL)
++	{
++	  if (missing_rpm_enlist (execfilename) == 0)
++	    missing_exec = MISSING_EXEC_NOT_FOUND;
++	  else
++	    missing_exec = MISSING_EXEC_ENLISTED;
++	}
++    }
++  if (missing_exec != MISSING_EXEC_ENLISTED)
++    if ((binary[0] == 0 || missing_rpm_enlist (binary) == 0)
++	&& (debug == NULL || missing_rpm_enlist (debug) == 0))
++#endif	/* HAVE_LIBRPM */
++      {
++	/* We do not collect and flush these messages as each such message
++	   already requires its own separate lines.  */
++
++	gdb_printf (gdb_stdlog,
++		    _("Missing separate debuginfo for %s.\n"), binary);
++	if (debug != NULL)
++	{
++	  if (access (debug, F_OK) == 0) {
++	    gdb_printf (gdb_stdlog, _("Try: %s %s\n"),
++#ifdef DNF_DEBUGINFO_INSTALL
++			"dnf"
++#else
++			"yum"
++#endif
++			" --enablerepo='*debug*' install", debug);
++	  } else
++	    gdb_printf (gdb_stdlog, _("The debuginfo package for this file is probably broken.\n"));
++	}
++      }
 +}
 +
  /* See build-id.h.  */
@@ -870,27 +1359,29 @@ diff --git a/gdb/build-id.c b/gdb/build-id.c
  /* See build-id.h.  */
  
  std::string
--find_separate_debug_file_by_buildid (struct objfile *objfile)
-+find_separate_debug_file_by_buildid (struct objfile *objfile,
-+			gdb::unique_xmalloc_ptr<char> *build_id_filename_return)
+ find_separate_debug_file_by_buildid (struct objfile *objfile,
+-				     deferred_warnings *warnings)
++				     deferred_warnings *warnings,
++				     gdb::unique_xmalloc_ptr<char> *build_id_filename_return)
  {
    const struct bfd_build_id *build_id;
  
--  build_id = build_id_bfd_get (objfile->obfd);
+-  build_id = build_id_bfd_get (objfile->obfd.get ());
 +  if (build_id_filename_return)
 +    *build_id_filename_return = NULL;
 +
-+  build_id = build_id_bfd_shdr_get (objfile->obfd);
++  build_id = build_id_bfd_shdr_get (objfile->obfd.get ());
    if (build_id != NULL)
      {
        if (separate_debug_file_debug)
- 	printf_unfiltered (_("\nLooking for separate debug info (build-id) for "
- 			     "%s\n"), objfile_name (objfile));
+@@ -222,8 +1358,21 @@ find_separate_debug_file_by_buildid (struct objfile *objfile,
+ 		    _("\nLooking for separate debug info (build-id) for "
+ 		      "%s\n"), objfile_name (objfile));
  
 +      char *build_id_filename_cstr = NULL;
        gdb_bfd_ref_ptr abfd (build_id_to_debug_bfd (build_id->size,
 -						   build_id->data));
-+						    build_id->data,
++						   build_id->data,
 +	      (!build_id_filename_return ? NULL : &build_id_filename_cstr)));
 +      if (build_id_filename_return)
 +	{
@@ -906,15 +1397,15 @@ diff --git a/gdb/build-id.c b/gdb/build-id.c
        /* Prevent looping on a stripped .debug file.  */
        if (abfd != NULL
  	  && filename_cmp (bfd_get_filename (abfd.get ()),
-@@ -223,3 +897,21 @@ find_separate_debug_file_by_buildid (struct objfile *objfile)
+@@ -243,3 +1392,22 @@ find_separate_debug_file_by_buildid (struct objfile *objfile,
  
    return std::string ();
  }
 +
-+extern void _initialize_build_id (void);
++void _initialize_build_id ();
 +
 +void
-+_initialize_build_id (void)
++_initialize_build_id ()
 +{
 +  add_setshow_zinteger_cmd ("build-id-verbose", no_class, &build_id_verbose,
 +			    _("\
@@ -926,7 +1417,8 @@ diff --git a/gdb/build-id.c b/gdb/build-id.c
 +			    show_build_id_verbose,
 +			    &setlist, &showlist);
 +
-+  gdb::observers::executable_changed.attach (debug_print_executable_changed);
++  gdb::observers::executable_changed.attach (debug_print_executable_changed,
++                                             "build-id");
 +}
 diff --git a/gdb/build-id.h b/gdb/build-id.h
 --- a/gdb/build-id.h
@@ -944,13 +1436,13 @@ diff --git a/gdb/build-id.h b/gdb/build-id.h
  
  /* Return true if ABFD has NT_GNU_BUILD_ID matching the CHECK value.
     Otherwise, issue a warning and return false.  */
-@@ -38,21 +39,26 @@ extern int build_id_verify (bfd *abfd,
+@@ -38,14 +39,19 @@ extern int build_id_verify (bfd *abfd,
     can be found, return NULL.  */
  
  extern gdb_bfd_ref_ptr build_id_to_debug_bfd (size_t build_id_len,
 -					      const bfd_byte *build_id);
 +					      const bfd_byte *build_id,
-+					      char **link_return);
++					      char **link_return = NULL);
 +
 +extern char *build_id_to_filename (const struct bfd_build_id *build_id,
 +				   char **link_return);
@@ -966,35 +1458,35 @@ diff --git a/gdb/build-id.h b/gdb/build-id.h
  
  /* Find the separate debug file for OBJFILE, by using the build-id
     associated with OBJFILE's BFD.  If successful, returns the file name for the
-    separate debug file, otherwise, return an empty string.  */
+@@ -58,7 +64,8 @@ extern gdb_bfd_ref_ptr build_id_to_exec_bfd (size_t build_id_len,
+    will be printed.  */
  
--extern std::string find_separate_debug_file_by_buildid
--  (struct objfile *objfile);
-+extern std::string find_separate_debug_file_by_buildid (struct objfile *objfile,
-+		       gdb::unique_xmalloc_ptr<char> *build_id_filename_return);
+ extern std::string find_separate_debug_file_by_buildid
+-  (struct objfile *objfile, deferred_warnings *warnings);
++  (struct objfile *objfile, deferred_warnings *warnings,
++   gdb::unique_xmalloc_ptr<char> *build_id_filename_return);
  
  /* Return an hex-string representation of BUILD_ID.  */
  
 diff --git a/gdb/coffread.c b/gdb/coffread.c
 --- a/gdb/coffread.c
 +++ b/gdb/coffread.c
-@@ -709,7 +709,8 @@ coff_symfile_read (struct objfile *objfile, symfile_add_flags symfile_flags)
-   /* Try to add separate debug file if no symbols table found.   */
-   if (!objfile_has_partial_symbols (objfile))
+@@ -729,7 +729,7 @@ coff_symfile_read (struct objfile *objfile, symfile_add_flags symfile_flags)
      {
--      std::string debugfile = find_separate_debug_file_by_buildid (objfile);
-+      std::string debugfile = find_separate_debug_file_by_buildid (objfile,
-+								   NULL);
+       deferred_warnings warnings;
+       std::string debugfile
+-	= find_separate_debug_file_by_buildid (objfile, &warnings);
++	= find_separate_debug_file_by_buildid (objfile, &warnings, NULL);
  
        if (debugfile.empty ())
- 	debugfile = find_separate_debug_file_by_debuglink (objfile);
+ 	debugfile
 diff --git a/gdb/corelow.c b/gdb/corelow.c
 --- a/gdb/corelow.c
 +++ b/gdb/corelow.c
 @@ -22,6 +22,10 @@
  #include <signal.h>
  #include <fcntl.h>
- #include "frame.h"		/* required by inferior.h */
+ #include "frame.h"
 +#include "auxv.h"
 +#include "build-id.h"
 +#include "elf/common.h"
@@ -1002,7 +1494,7 @@ diff --git a/gdb/corelow.c b/gdb/corelow.c
  #include "inferior.h"
  #include "infrun.h"
  #include "symtab.h"
-@@ -362,6 +366,8 @@ add_to_thread_list (bfd *abfd, asection *asect, void *reg_sect_arg)
+@@ -380,6 +384,8 @@ add_to_thread_list (asection *asect, asection *reg_sect, inferior *inf)
      switch_to_thread (thr);			/* Yes, make it current.  */
  }
  
@@ -1011,7 +1503,7 @@ diff --git a/gdb/corelow.c b/gdb/corelow.c
  /* Issue a message saying we have no core to debug, if FROM_TTY.  */
  
  static void
-@@ -398,19 +404,25 @@ core_file_command (const char *filename, int from_tty)
+@@ -563,12 +569,14 @@ rename_vmcore_idle_reg_sections (bfd *abfd, inferior *inf)
  static void
  locate_exec_from_corefile_build_id (bfd *abfd, int from_tty)
  {
@@ -1026,21 +1518,23 @@ diff --git a/gdb/corelow.c b/gdb/corelow.c
 +    = build_id_to_exec_bfd (build_id->size, build_id->data,
 +			    &build_id_filename);
  
-   if (execbfd != nullptr)
+   if (execbfd == nullptr)
      {
+@@ -596,7 +604,12 @@ locate_exec_from_corefile_build_id (bfd *abfd, int from_tty)
        exec_file_attach (bfd_get_filename (execbfd.get ()), from_tty);
        symbol_file_add_main (bfd_get_filename (execbfd.get ()),
  			    symfile_add_flag (from_tty ? SYMFILE_VERBOSE : 0));
-+      if (symfile_objfile != NULL)
-+	symfile_objfile->flags |= OBJF_BUILD_ID_CORE_LOADED;
++      if (current_program_space->symfile_object_file != NULL)
++	current_program_space->symfile_object_file->flags |=
++	  OBJF_BUILD_ID_CORE_LOADED;
      }
 +  else
 +    debug_print_missing (BUILD_ID_MAIN_EXECUTABLE_FILENAME, build_id_filename);
  }
  
  /* See gdbcore.h.  */
-@@ -1189,4 +1201,11 @@ _initialize_corelow ()
-            maintenance_print_core_file_backed_mappings,
+@@ -1506,4 +1519,11 @@ _initialize_corelow ()
+ 	   maintenance_print_core_file_backed_mappings,
  	   _("Print core file's file-backed mappings."),
  	   &maintenanceprintlist);
 +
@@ -1054,7 +1548,7 @@ diff --git a/gdb/corelow.c b/gdb/corelow.c
 diff --git a/gdb/doc/gdb.texinfo b/gdb/doc/gdb.texinfo
 --- a/gdb/doc/gdb.texinfo
 +++ b/gdb/doc/gdb.texinfo
-@@ -21074,6 +21074,27 @@ information files.
+@@ -22296,6 +22296,27 @@ information files.
  
  @end table
  
@@ -1085,16 +1579,16 @@ diff --git a/gdb/doc/gdb.texinfo b/gdb/doc/gdb.texinfo
 diff --git a/gdb/dwarf2/index-cache.c b/gdb/dwarf2/index-cache.c
 --- a/gdb/dwarf2/index-cache.c
 +++ b/gdb/dwarf2/index-cache.c
-@@ -95,7 +95,7 @@ index_cache::store (dwarf2_per_objfile *per_objfile)
+@@ -96,7 +96,7 @@ index_cache_store_context::index_cache_store_context (const index_cache &ic,
      return;
  
    /* Get build id of objfile.  */
--  const bfd_build_id *build_id = build_id_bfd_get (obj->obfd);
-+  const bfd_build_id *build_id = build_id_bfd_shdr_get (obj->obfd);
+-  const bfd_build_id *build_id = build_id_bfd_get (per_bfd->obfd);
++  const bfd_build_id *build_id = build_id_bfd_shdr_get (per_bfd->obfd);
    if (build_id == nullptr)
      {
-       if (debug_index_cache)
-@@ -113,7 +113,8 @@ index_cache::store (dwarf2_per_objfile *per_objfile)
+       index_cache_debug ("objfile %s has no build id",
+@@ -111,7 +111,8 @@ index_cache_store_context::index_cache_store_context (const index_cache &ic,
  
    if (dwz != nullptr)
      {
@@ -1107,25 +1601,16 @@ diff --git a/gdb/dwarf2/index-cache.c b/gdb/dwarf2/index-cache.c
 diff --git a/gdb/dwarf2/read.c b/gdb/dwarf2/read.c
 --- a/gdb/dwarf2/read.c
 +++ b/gdb/dwarf2/read.c
-@@ -2225,7 +2225,7 @@ dwarf2_get_dwz_file (dwarf2_per_bfd *per_bfd)
-     }
- 
-   if (dwz_bfd == NULL)
--    dwz_bfd = build_id_to_debug_bfd (buildid_len, buildid);
-+    dwz_bfd = build_id_to_debug_bfd (buildid_len, buildid, NULL);
- 
-   if (dwz_bfd == nullptr)
-     {
-@@ -5989,7 +5989,7 @@ get_gdb_index_contents_from_section (objfile *obj, T *section_owner)
+@@ -3355,7 +3355,7 @@ get_gdb_index_contents_from_section (objfile *obj, T *section_owner)
  static gdb::array_view<const gdb_byte>
  get_gdb_index_contents_from_cache (objfile *obj, dwarf2_per_bfd *dwarf2_per_bfd)
  {
--  const bfd_build_id *build_id = build_id_bfd_get (obj->obfd);
-+  const bfd_build_id *build_id = build_id_bfd_shdr_get (obj->obfd);
+-  const bfd_build_id *build_id = build_id_bfd_get (obj->obfd.get ());
++  const bfd_build_id *build_id = build_id_bfd_shdr_get (obj->obfd.get ());
    if (build_id == nullptr)
      return {};
  
-@@ -6002,7 +6002,7 @@ get_gdb_index_contents_from_cache (objfile *obj, dwarf2_per_bfd *dwarf2_per_bfd)
+@@ -3368,7 +3368,7 @@ get_gdb_index_contents_from_cache (objfile *obj, dwarf2_per_bfd *dwarf2_per_bfd)
  static gdb::array_view<const gdb_byte>
  get_gdb_index_contents_from_cache_dwz (objfile *obj, dwz_file *dwz)
  {
@@ -1137,50 +1622,52 @@ diff --git a/gdb/dwarf2/read.c b/gdb/dwarf2/read.c
 diff --git a/gdb/elfread.c b/gdb/elfread.c
 --- a/gdb/elfread.c
 +++ b/gdb/elfread.c
-@@ -1298,7 +1298,9 @@ elf_symfile_read (struct objfile *objfile, symfile_add_flags symfile_flags)
- 	   && objfile->separate_debug_objfile == NULL
- 	   && objfile->separate_debug_objfile_backlink == NULL)
+@@ -1220,8 +1220,10 @@ elf_symfile_read_dwarf2 (struct objfile *objfile,
      {
--      std::string debugfile = find_separate_debug_file_by_buildid (objfile);
+       deferred_warnings warnings;
+ 
 +      gdb::unique_xmalloc_ptr<char> build_id_filename;
-+      std::string debugfile
-+	= find_separate_debug_file_by_buildid (objfile, &build_id_filename);
+       std::string debugfile
+-	= find_separate_debug_file_by_buildid (objfile, &warnings);
++	= find_separate_debug_file_by_buildid (objfile, &warnings,
++					       &build_id_filename);
  
        if (debugfile.empty ())
- 	debugfile = find_separate_debug_file_by_debuglink (objfile);
-@@ -1313,7 +1315,7 @@ elf_symfile_read (struct objfile *objfile, symfile_add_flags symfile_flags)
-       else
+ 	debugfile = find_separate_debug_file_by_debuglink (objfile, &warnings);
+@@ -1239,7 +1241,7 @@ elf_symfile_read_dwarf2 (struct objfile *objfile,
  	{
  	  has_dwarf2 = false;
--	  const struct bfd_build_id *build_id = build_id_bfd_get (objfile->obfd);
-+	  const struct bfd_build_id *build_id = build_id_bfd_shdr_get (objfile->obfd);
+ 	  const struct bfd_build_id *build_id
+-	    = build_id_bfd_get (objfile->obfd.get ());
++	    = build_id_bfd_shdr_get (objfile->obfd.get ());
+ 	  const char *filename = bfd_get_filename (objfile->obfd.get ());
  
  	  if (build_id != nullptr)
- 	    {
-@@ -1338,6 +1340,10 @@ elf_symfile_read (struct objfile *objfile, symfile_add_flags symfile_flags)
+@@ -1265,6 +1267,11 @@ elf_symfile_read_dwarf2 (struct objfile *objfile,
  		      has_dwarf2 = true;
  		    }
  		}
 +		/* Check if any separate debug info has been extracted out.  */
-+		else if (bfd_get_section_by_name (objfile->obfd, ".gnu_debuglink")
++		else if (bfd_get_section_by_name (objfile->obfd.get (),
++		                                  ".gnu_debuglink")
 +			 != NULL)
 +		  debug_print_missing (objfile_name (objfile), build_id_filename.get ());
  	    }
  	}
-     }
+       /* If all the methods to collect the debuginfo failed, print the
 diff --git a/gdb/exec.c b/gdb/exec.c
 --- a/gdb/exec.c
 +++ b/gdb/exec.c
-@@ -264,7 +264,7 @@ validate_exec_file (int from_tty)
-   reopen_exec_file ();
+@@ -237,7 +237,7 @@ validate_exec_file (int from_tty)
    current_exec_file = get_exec_file (0);
  
--  const bfd_build_id *exec_file_build_id = build_id_bfd_get (exec_bfd);
-+  const bfd_build_id *exec_file_build_id = build_id_bfd_shdr_get (exec_bfd);
+   const bfd_build_id *exec_file_build_id
+-    = build_id_bfd_get (current_program_space->exec_bfd ());
++    = build_id_bfd_shdr_get (current_program_space->exec_bfd ());
    if (exec_file_build_id != nullptr)
      {
        /* Prepend the target prefix, to force gdb_bfd_open to open the
-@@ -277,7 +277,7 @@ validate_exec_file (int from_tty)
+@@ -250,7 +250,7 @@ validate_exec_file (int from_tty)
        if (abfd != nullptr)
  	{
  	  const bfd_build_id *target_exec_file_build_id
@@ -1192,8 +1679,8 @@ diff --git a/gdb/exec.c b/gdb/exec.c
 diff --git a/gdb/objfiles.h b/gdb/objfiles.h
 --- a/gdb/objfiles.h
 +++ b/gdb/objfiles.h
-@@ -714,6 +714,10 @@ struct objfile
-   bool skip_jit_symbol_lookup = false;
+@@ -884,6 +884,10 @@ struct objfile
+   bool object_format_has_copy_relocs = false;
  };
  
 +/* This file was loaded according to the BUILD_ID_CORE_LOADS rules.  */
@@ -1206,36 +1693,36 @@ diff --git a/gdb/objfiles.h b/gdb/objfiles.h
 diff --git a/gdb/python/py-objfile.c b/gdb/python/py-objfile.c
 --- a/gdb/python/py-objfile.c
 +++ b/gdb/python/py-objfile.c
-@@ -132,7 +132,7 @@ objfpy_get_build_id (PyObject *self, void *closure)
+@@ -158,7 +158,7 @@ objfpy_get_build_id (PyObject *self, void *closure)
  
    try
      {
--      build_id = build_id_bfd_get (objfile->obfd);
-+      build_id = build_id_bfd_shdr_get (objfile->obfd);
+-      build_id = build_id_bfd_get (objfile->obfd.get ());
++      build_id = build_id_bfd_shdr_get (objfile->obfd.get ());
      }
    catch (const gdb_exception &except)
      {
-@@ -600,7 +600,7 @@ objfpy_lookup_objfile_by_build_id (const char *build_id)
-       /* Don't return separate debug files.  */
-       if (objfile->separate_debug_objfile_backlink != NULL)
- 	continue;
--      obfd_build_id = build_id_bfd_get (objfile->obfd);
-+      obfd_build_id = build_id_bfd_shdr_get (objfile->obfd);
-       if (obfd_build_id == NULL)
- 	continue;
-       if (objfpy_build_id_matches (obfd_build_id, build_id))
+@@ -629,7 +629,7 @@ gdbpy_lookup_objfile (PyObject *self, PyObject *args, PyObject *kw)
+ 	   if (obfd == nullptr)
+ 	     return 0;
+ 
+-	   const bfd_build_id *obfd_build_id = build_id_bfd_get (obfd);
++	   const bfd_build_id *obfd_build_id = build_id_bfd_shdr_get (obfd);
+ 	   if (obfd_build_id == nullptr)
+ 	     return 0;
+ 
 diff --git a/gdb/solib-svr4.c b/gdb/solib-svr4.c
 --- a/gdb/solib-svr4.c
 +++ b/gdb/solib-svr4.c
-@@ -45,6 +45,7 @@
+@@ -44,6 +44,7 @@
  #include "auxv.h"
  #include "gdb_bfd.h"
  #include "probe.h"
 +#include "build-id.h"
  
- static struct link_map_offsets *svr4_fetch_link_map_offsets (void);
- static int svr4_have_link_map_offsets (void);
-@@ -1338,9 +1339,51 @@ svr4_read_so_list (svr4_info *info, CORE_ADDR lm, CORE_ADDR prev_lm,
+ #include <map>
+ 
+@@ -1318,9 +1319,51 @@ svr4_read_so_list (svr4_info *info, CORE_ADDR lm, CORE_ADDR prev_lm,
  	  continue;
  	}
  
@@ -1277,8 +1764,8 @@ diff --git a/gdb/solib-svr4.c b/gdb/solib-svr4.c
 +		   instead) if the on-disk files no longer match the
 +		   running program version.  */
 +
-+		if (symfile_objfile != NULL
-+		    && (symfile_objfile->flags
++		if (current_program_space->symfile_object_file != NULL
++		    && (current_program_space->symfile_object_file->flags
 +			& OBJF_BUILD_ID_CORE_LOADED) != 0)
 +		  newobj->so_name[0] = 0;
 +	      }
@@ -1293,21 +1780,21 @@ diff --git a/gdb/solib-svr4.c b/gdb/solib-svr4.c
 diff --git a/gdb/source.c b/gdb/source.c
 --- a/gdb/source.c
 +++ b/gdb/source.c
-@@ -1165,7 +1165,7 @@ open_source_file (struct symtab *s)
- 	      srcpath += s->filename;
+@@ -1167,7 +1167,7 @@ open_source_file (struct symtab *s)
  	    }
  
--	  const struct bfd_build_id *build_id = build_id_bfd_get (ofp->obfd);
-+	  const struct bfd_build_id *build_id = build_id_bfd_shdr_get (ofp->obfd);
+ 	  const struct bfd_build_id *build_id
+-	    = build_id_bfd_get (ofp->obfd.get ());
++	    = build_id_bfd_shdr_get (ofp->obfd.get ());
  
  	  /* Query debuginfod for the source file.  */
  	  if (build_id != nullptr && !srcpath.empty ())
 diff --git a/gdb/symfile.h b/gdb/symfile.h
 --- a/gdb/symfile.h
 +++ b/gdb/symfile.h
-@@ -550,12 +550,18 @@ void expand_symtabs_matching
- void map_symbol_filenames (symbol_filename_ftype *fun, void *data,
- 			   int need_fullname);
+@@ -357,12 +357,18 @@ bool expand_symtabs_matching
+ void map_symbol_filenames (gdb::function_view<symbol_filename_ftype> fun,
+ 			   bool need_fullname);
  
 +
  /* Target-agnostic function to load the sections of an executable into memory.
@@ -1321,13 +1808,13 @@ diff --git a/gdb/symfile.h b/gdb/symfile.h
 +extern void debug_print_missing (const char *binary, const char *debug);
 +#define BUILD_ID_MAIN_EXECUTABLE_FILENAME _("the main executable file")
 +
- /* From dwarf2read.c */
+ /* From minidebug.c.  */
  
- /* Names for a dwarf2 debugging section.  The field NORMAL is the normal
+ extern gdb_bfd_ref_ptr find_separate_debug_file_in_section (struct objfile *);
 diff --git a/gdb/testsuite/gdb.base/corefile.exp b/gdb/testsuite/gdb.base/corefile.exp
 --- a/gdb/testsuite/gdb.base/corefile.exp
 +++ b/gdb/testsuite/gdb.base/corefile.exp
-@@ -343,3 +343,33 @@ gdb_test_multiple "core-file $corefile" $test {
+@@ -347,3 +347,33 @@ gdb_test_multiple "core-file $corefile" $test {
  	pass $test
      }
  }
@@ -1364,7 +1851,7 @@ diff --git a/gdb/testsuite/gdb.base/corefile.exp b/gdb/testsuite/gdb.base/corefi
 diff --git a/gdb/testsuite/gdb.base/gdbinit-history.exp b/gdb/testsuite/gdb.base/gdbinit-history.exp
 --- a/gdb/testsuite/gdb.base/gdbinit-history.exp
 +++ b/gdb/testsuite/gdb.base/gdbinit-history.exp
-@@ -181,7 +181,8 @@ proc test_empty_history_filename { } {
+@@ -179,7 +179,8 @@ proc test_empty_history_filename { } {
      global env
      global gdb_prompt
  
@@ -1388,7 +1875,17 @@ diff --git a/gdb/testsuite/gdb.base/new-ui-pending-input.exp b/gdb/testsuite/gdb
 diff --git a/gdb/testsuite/lib/gdb.exp b/gdb/testsuite/lib/gdb.exp
 --- a/gdb/testsuite/lib/gdb.exp
 +++ b/gdb/testsuite/lib/gdb.exp
-@@ -2011,6 +2011,17 @@ proc default_gdb_start { } {
+@@ -226,7 +226,8 @@ if ![info exists INTERNAL_GDBFLAGS] {
+ 		   "-nx" \
+ 		   "-q" \
+ 		   {-iex "set height 0"} \
+-		   {-iex "set width 0"}]]
++		   {-iex "set width 0"} \
++		   {-iex "set build-id-verbose 0"}]]
+ 
+     # If DEBUGINFOD_URLS is set, gdb will try to download sources and
+     # debug info for f.i. system libraries.  Prevent this.
+@@ -2434,6 +2435,17 @@ proc default_gdb_start { } {
  	}
      }
  
@@ -1409,7 +1906,7 @@ diff --git a/gdb/testsuite/lib/gdb.exp b/gdb/testsuite/lib/gdb.exp
 diff --git a/gdb/testsuite/lib/mi-support.exp b/gdb/testsuite/lib/mi-support.exp
 --- a/gdb/testsuite/lib/mi-support.exp
 +++ b/gdb/testsuite/lib/mi-support.exp
-@@ -308,6 +308,16 @@ proc default_mi_gdb_start { args } {
+@@ -321,6 +321,16 @@ proc default_mi_gdb_start { { flags {} } } {
  	    warning "Couldn't set the width to 0."
  	}
      }

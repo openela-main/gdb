@@ -1,0 +1,467 @@
+From FEDORA_PATCHES Mon Sep 17 00:00:00 2001
+From: Andrew Burgess <aburgess@redhat.com>
+Date: Wed, 18 Jan 2023 12:09:05 +0000
+Subject: gdb-rhel-13298-inferior-funcall-bp-condition-5-of-5.patch
+
+;;gdb: rename unwindonsignal to unwind-on-signal
+;;(Andrew Burgess, RHEL-13298)
+
+We now have unwind-on-timeout and unwind-on-terminating-exception, and
+then the odd one out unwindonsignal.
+
+I'm not a great fan of these squashed together command names, so in
+this commit I propose renaming this to unwind-on-signal.
+
+Obviously I've added the hidden alias unwindonsignal so any existing
+GDB scripts will keep working.
+
+There's one test that I've extended to test the alias works, but in
+most of the other test scripts I've changed over to use the new name.
+
+The docs are updated to reference the new name.
+
+Reviewed-By: Eli Zaretskii <eliz@gnu.org>
+Tested-By: Luis Machado <luis.machado@arm.com>
+Tested-By: Keith Seitz <keiths@redhat.com>
+
+diff --git a/gdb/NEWS b/gdb/NEWS
+--- a/gdb/NEWS
++++ b/gdb/NEWS
+@@ -32,6 +32,10 @@ maintenance info line-table
+   if the line is considered the start of the epilgoue, and thus a point at
+   which the frame can be considered destroyed.
+ 
++set unwindonsignal on|off
++show unwindonsignal
++  These commands are now aliases for the new set/show unwind-on-signal.
++
+ * New commands
+ 
+ info missing-debug-handler
+@@ -81,6 +85,11 @@ show unwind-on-timeout
+   dummy frame that was added for the inferior call, and restoring the
+   inferior state to how it was before the inferior call started.
+ 
++set unwind-on-signal on|off
++show unwind-on-signal
++  These new commands replaces the existing set/show unwindonsignal.  The
++  old command is maintained as an alias.
++
+ * New features in the GDB remote stub, GDBserver
+ 
+   ** The --remote-debug and --event-loop-debug command line options
+diff --git a/gdb/doc/gdb.texinfo b/gdb/doc/gdb.texinfo
+--- a/gdb/doc/gdb.texinfo
++++ b/gdb/doc/gdb.texinfo
+@@ -20886,7 +20886,7 @@ value history.
+ It is possible for the function you call via the @code{print} or
+ @code{call} command to generate a signal (e.g., if there's a bug in
+ the function, or if you passed it incorrect arguments).  What happens
+-in that case is controlled by the @code{set unwindonsignal} command.
++in that case is controlled by the @code{set unwind-on-signal} command.
+ 
+ Similarly, with a C@t{++} program it is possible for the function you
+ call via the @code{print} or @code{call} command to generate an
+@@ -20900,7 +20900,8 @@ in that case is controlled by the
+ 
+ @anchor{stack unwind settings}
+ @table @code
+-@item set unwindonsignal
++@item set unwind-on-signal
++@kindex set unwind-on-signal
+ @kindex set unwindonsignal
+ @cindex unwind stack in called functions
+ @cindex call dummy stack unwinding
+@@ -20911,11 +20912,18 @@ the context to what it was before the call.  If set to off (the
+ default), @value{GDBN} stops in the frame where the signal was
+ received.
+ 
+-@item show unwindonsignal
++The command @code{set unwindonsignal} is an alias for this command,
++and is maintained for backward compatibility.
++
++@item show unwind-on-signal
++@kindex show unwind-on-signal
+ @kindex show unwindonsignal
+ Show the current setting of stack unwinding in the functions called by
+ @value{GDBN}.
+ 
++The command @code{show unwindonsignal} is an alias for this command,
++and is maintained for backward compatibility.
++
+ @item set unwind-on-terminating-exception
+ @kindex set unwind-on-terminating-exception
+ @cindex unwind stack in called functions with unhandled exceptions
+@@ -20980,7 +20988,7 @@ call by typing the interrupt character (often @kbd{Ctrl-c}).
+ If a called function is interrupted for any reason, including hitting
+ a breakpoint, or triggering a watchpoint, and the stack is not unwound
+ due to @code{set unwind-on-terminating-exception on}, @code{set
+-unwind-on-timeout on}, or @code{set unwindonsignal on} (@pxref{stack
++unwind-on-timeout on}, or @code{set unwind-on-signal on} (@pxref{stack
+ unwind settings}), then the dummy-frame, created by @value{GDBN} to
+ facilitate the call to the program function, will be visible in the
+ backtrace, for example frame @code{#3} in the following backtrace:
+diff --git a/gdb/infcall.c b/gdb/infcall.c
+--- a/gdb/infcall.c
++++ b/gdb/infcall.c
+@@ -1747,7 +1747,7 @@ When the function is done executing, GDB will silently stop."),
+ The program being debugged received signal %s, %s\n\
+ while in a function called from GDB.  GDB has restored the context\n\
+ to what it was before the call.  To change this behavior use\n\
+-\"set unwindonsignal off\".  Evaluation of the expression containing\n\
++\"set unwind-on-signal off\".  Evaluation of the expression containing\n\
+ the function (%s) will be abandoned."),
+ 		     gdb_signal_to_name (stop_signal),
+ 		     gdb_signal_to_string (stop_signal),
+@@ -1766,7 +1766,7 @@ the function (%s) will be abandoned."),
+ 	      error (_("\
+ The program being debugged was signaled while in a function called from GDB.\n\
+ GDB remains in the frame where the signal was received.\n\
+-To change this behavior use \"set unwindonsignal on\".\n\
++To change this behavior use \"set unwind-on-signal on\".\n\
+ Evaluation of the expression containing the function\n\
+ (%s) will be abandoned.\n\
+ When the function is done executing, GDB will silently stop."),
+@@ -1898,17 +1898,22 @@ The default is to perform the conversion."),
+ 			   show_coerce_float_to_double_p,
+ 			   &setlist, &showlist);
+ 
+-  add_setshow_boolean_cmd ("unwindonsignal", no_class,
+-			   &unwind_on_signal_p, _("\
++  set_show_commands setshow_unwind_on_signal_cmds
++    = add_setshow_boolean_cmd ("unwind-on-signal", no_class,
++			       &unwind_on_signal_p, _("\
+ Set unwinding of stack if a signal is received while in a call dummy."), _("\
+ Show unwinding of stack if a signal is received while in a call dummy."), _("\
+-The unwindonsignal lets the user determine what gdb should do if a signal\n\
++The unwind-on-signal lets the user determine what gdb should do if a signal\n\
+ is received while in a function called from gdb (call dummy).  If set, gdb\n\
+ unwinds the stack and restore the context to what as it was before the call.\n\
+ The default is to stop in the frame where the signal was received."),
+-			   NULL,
+-			   show_unwind_on_signal_p,
+-			   &setlist, &showlist);
++			       NULL,
++			       show_unwind_on_signal_p,
++			       &setlist, &showlist);
++  add_alias_cmd ("unwindonsignal", setshow_unwind_on_signal_cmds.set,
++		 no_class, 1, &setlist);
++  add_alias_cmd ("unwindonsignal", setshow_unwind_on_signal_cmds.show,
++		 no_class, 1, &showlist);
+ 
+   add_setshow_boolean_cmd ("unwind-on-terminating-exception", no_class,
+ 			   &unwind_on_terminating_exception_p, _("\
+diff --git a/gdb/testsuite/gdb.base/callfuncs.exp b/gdb/testsuite/gdb.base/callfuncs.exp
+--- a/gdb/testsuite/gdb.base/callfuncs.exp
++++ b/gdb/testsuite/gdb.base/callfuncs.exp
+@@ -46,7 +46,7 @@ proc do_function_calls {prototypes} {
+ 
+     # If any of these calls segv we don't want to affect subsequent tests.
+     # E.g., we want to ensure register values are restored.
+-    gdb_test_no_output "set unwindonsignal on"
++    gdb_test_no_output "set unwind-on-signal on"
+ 
+     gdb_test "p t_char_values(0,0)" " = 0"
+     gdb_test "p t_char_values('a','b')" " = 1"
+@@ -237,7 +237,7 @@ proc do_function_calls {prototypes} {
+     	"call inferior func with struct - returns char *"
+ 
+     # Restore default value.
+-    gdb_test_no_output "set unwindonsignal off"
++    gdb_test_no_output "set unwind-on-signal off"
+ }
+ 
+ # Procedure to get current content of all registers.
+diff --git a/gdb/testsuite/gdb.base/infcall-failure.exp b/gdb/testsuite/gdb.base/infcall-failure.exp
+--- a/gdb/testsuite/gdb.base/infcall-failure.exp
++++ b/gdb/testsuite/gdb.base/infcall-failure.exp
+@@ -137,7 +137,7 @@ proc_with_prefix run_cond_hits_segfault_test { async_p non_stop_p } {
+ 	     "Error in testing condition for breakpoint ${bp_1_num}:" \
+ 	     "The program being debugged was signaled while in a function called from GDB\\." \
+ 	     "GDB remains in the frame where the signal was received\\." \
+-	     "To change this behavior use \"set unwindonsignal on\"\\." \
++	     "To change this behavior use \"set unwind-on-signal on\"\\." \
+ 	     "Evaluation of the expression containing the function" \
+ 	     "\\(func_segfault\\) will be abandoned\\." \
+ 	     "When the function is done executing, GDB will silently stop\\."]
+@@ -166,7 +166,7 @@ proc_with_prefix run_call_hits_segfault_test { async_p non_stop_p } {
+ 	     "${::decimal}\\s+\[^\r\n\]+Segfault here\[^\r\n\]+" \
+ 	     "The program being debugged was signaled while in a function called from GDB\\." \
+ 	     "GDB remains in the frame where the signal was received\\." \
+-	     "To change this behavior use \"set unwindonsignal on\"\\." \
++	     "To change this behavior use \"set unwind-on-signal on\"\\." \
+ 	     "Evaluation of the expression containing the function" \
+ 	     "\\(func_segfault\\) will be abandoned\\." \
+ 	     "When the function is done executing, GDB will silently stop\\."]
+diff --git a/gdb/testsuite/gdb.base/unwindonsignal.exp b/gdb/testsuite/gdb.base/unwindonsignal.exp
+--- a/gdb/testsuite/gdb.base/unwindonsignal.exp
++++ b/gdb/testsuite/gdb.base/unwindonsignal.exp
+@@ -34,13 +34,29 @@ gdb_test "break stop_here" "Breakpoint \[0-9\]* at .*"
+ gdb_test "continue" "Continuing.*Breakpoint \[0-9\]*, stop_here.*" \
+     "continue to breakpoint at stop_here"
+ 
+-# Turn on unwindonsignal.
+-gdb_test_no_output "set unwindonsignal on" \
+-	"setting unwindonsignal"
++# Turn on unwind-on-signal.
++gdb_test_no_output "set unwind-on-signal on" \
++	"setting unwind-on-signal"
+ 
+-gdb_test "show unwindonsignal" \
++gdb_test "show unwind-on-signal" \
+ 	"Unwinding of stack .* is on." \
+-	"showing unwindonsignal"
++	"showing unwind-on-signal"
++
++# For backward compatibility we maintain a 'unwindonsignal' alias for
++# 'unwind-on-signal', check it now.
++gdb_test "show unwindonsignal" \
++    "Unwinding of stack .* is on\\." \
++    "showing unwindonsignal alias"
++
++gdb_test_no_output "set unwindonsignal off" \
++    "setting unwindonsignal alias to off"
++
++gdb_test "show unwind-on-signal" \
++    "Unwinding of stack .* is off\\." \
++    "showing unwind-on-signal after setting via alias"
++
++gdb_test_no_output "set unwindonsignal on" \
++    "setting unwindonsignal alias to on"
+ 
+ # Call function (causing the program to get a signal), and see if gdb handles
+ # it properly.
+@@ -49,7 +65,7 @@ if {[gdb_test "call gen_signal ()"  \
+ 	      "The program being debugged received signal SIGABRT, Aborted" \
+ 	      "while in a function called from GDB\\.  GDB has restored the context" \
+ 	      "to what it was before the call\\.  To change this behavior use" \
+-	      "\"set unwindonsignal off\"\\.  Evaluation of the expression containing" \
++	      "\"set unwind-on-signal off\"\\.  Evaluation of the expression containing" \
+ 	      "the function \\(gen_signal\\) will be abandoned\\."] \
+ 	 "unwindonsignal, inferior function call signaled"] != 0} {
+     return 0
+@@ -58,15 +74,15 @@ if {[gdb_test "call gen_signal ()"  \
+ # Verify the stack got unwound.
+ gdb_test "bt" \
+     "#0 *\[x0-9a-f in\]*stop_here \\(.*\\) at .*#1 *\[x0-9a-f in\]*main \\(.*\\) at .*" \
+-	"unwindonsignal, stack unwound"
++	"stack unwound"
+ 
+ # Verify the dummy frame got removed from dummy_frame_stack.
+ gdb_test_multiple "maint print dummy-frames" \
+-	"unwindonsignal, dummy frame removed" {
++	"unwind-on-signal, dummy frame removed" {
+     -re "\[\r\n\]*.*stack=.*code=.*\[\r\n\]+$gdb_prompt $" {
+-	fail "unwindonsignal, dummy frame removed"
++	fail $gdb_test_name
+     }
+     -re "\[\r\n\]+$gdb_prompt $" {
+-	pass "unwindonsignal, dummy frame removed"
++	pass $gdb_test_name
+     }
+ }
+diff --git a/gdb/testsuite/gdb.compile/compile-cplus.exp b/gdb/testsuite/gdb.compile/compile-cplus.exp
+--- a/gdb/testsuite/gdb.compile/compile-cplus.exp
++++ b/gdb/testsuite/gdb.compile/compile-cplus.exp
+@@ -131,13 +131,13 @@ gdb_test "return" "\r\n#0  main .*" "return" \
+ 	 "Make _gdb_expr\\(__gdb_regs\\*\\) return now\\? \\(y or n\\) " "y"
+ gdb_test "info sym $infcall_pc" "\r\nNo symbol matches .*" "info sym not found"
+ 
+-gdb_test_no_output "set unwindonsignal on"
++gdb_test_no_output "set unwind-on-signal on"
+ gdb_test "compile code *(volatile int *) 0 = 0;" \
+     [multi_line \
+ 	 "The program being debugged received signal SIGSEGV, Segmentation fault" \
+ 	 "while in a function called from GDB\\.  GDB has restored the context" \
+ 	 "to what it was before the call\\.  To change this behavior use" \
+-	 "\"set unwindonsignal off\"\\.  Evaluation of the expression containing" \
++	 "\"set unwind-on-signal off\"\\.  Evaluation of the expression containing" \
+ 	 "the function \\(_gdb_expr\\(__gdb_regs\\*\\)\\) will be abandoned\\."] \
+     "compile code segfault second"
+ 
+@@ -313,7 +313,7 @@ gdb_test "compile code static const int readonly = 1; *(int *) &readonly = 2;" \
+ 	 "The program being debugged received signal SIGSEGV, Segmentation fault" \
+ 	 "while in a function called from GDB\\.  GDB has restored the context" \
+ 	 "to what it was before the call\\.  To change this behavior use" \
+-	 "\"set unwindonsignal off\"\\.  Evaluation of the expression containing" \
++	 "\"set unwind-on-signal off\"\\.  Evaluation of the expression containing" \
+ 	 "the function \\(_gdb_expr\\(__gdb_regs\\*\\)\\) will be abandoned\\."]
+ gdb_test_no_output "set debug compile off"
+ 
+diff --git a/gdb/testsuite/gdb.compile/compile.exp b/gdb/testsuite/gdb.compile/compile.exp
+--- a/gdb/testsuite/gdb.compile/compile.exp
++++ b/gdb/testsuite/gdb.compile/compile.exp
+@@ -157,13 +157,13 @@ gdb_test "return" "\r\n#0  main .*" "return" \
+ 	 "Make _gdb_expr return now\\? \\(y or n\\) " "y"
+ gdb_test "info sym $infcall_pc" "\r\nNo symbol matches .*" "info sym not found"
+ 
+-gdb_test_no_output "set unwindonsignal on"
++gdb_test_no_output "set unwind-on-signal on"
+ gdb_test "compile code *(volatile int *) 0 = 0;" \
+     [multi_line \
+ 	 "The program being debugged received signal SIGSEGV, Segmentation fault" \
+ 	 "while in a function called from GDB\\.  GDB has restored the context" \
+ 	 "to what it was before the call\\.  To change this behavior use" \
+-	 "\"set unwindonsignal off\"\\.  Evaluation of the expression containing" \
++	 "\"set unwind-on-signal off\"\\.  Evaluation of the expression containing" \
+ 	 "the function \\(_gdb_expr\\) will be abandoned\\."] \
+     "compile code segfault second"
+ 
+@@ -321,7 +321,7 @@ gdb_test "compile code static const int readonly = 1; *(int *) &readonly = 2;" \
+ 	 "The program being debugged received signal SIGSEGV, Segmentation fault" \
+ 	 "while in a function called from GDB\\.  GDB has restored the context" \
+ 	 "to what it was before the call\\.  To change this behavior use" \
+-	 "\"set unwindonsignal off\"\\.  Evaluation of the expression containing" \
++	 "\"set unwind-on-signal off\"\\.  Evaluation of the expression containing" \
+ 	 "the function \\(_gdb_expr\\) will be abandoned\\."]
+ gdb_test_no_output "set debug compile off"
+ 
+diff --git a/gdb/testsuite/gdb.cp/gdb2495.exp b/gdb/testsuite/gdb.cp/gdb2495.exp
+--- a/gdb/testsuite/gdb.cp/gdb2495.exp
++++ b/gdb/testsuite/gdb.cp/gdb2495.exp
+@@ -98,10 +98,10 @@ if {![runto_main]} {
+ # behaviour; it should not.  Test both on and off states.
+ 
+ # Turn on unwind on signal behaviour.
+-gdb_test_no_output "set unwindonsignal on"
++gdb_test_no_output "set unwind-on-signal on"
+ 
+ # Check that it is turned on.
+-gdb_test "show unwindonsignal" \
++gdb_test "show unwind-on-signal" \
+     "signal is received while in a call dummy is on.*" \
+     "turn on unwind on signal"
+ 
+@@ -112,20 +112,20 @@ gdb_test "p exceptions.raise_signal(1)" \
+ 	 "The program being debugged received signal SIGABRT, Aborted" \
+ 	 "while in a function called from GDB\\.  GDB has restored the context" \
+ 	 "to what it was before the call\\.  To change this behavior use" \
+-	 "\"set unwindonsignal off\"\\.  Evaluation of the expression containing" \
++	 "\"set unwind-on-signal off\"\\.  Evaluation of the expression containing" \
+ 	 "the function \\(SimpleException::raise_signal\\(int\\)\\) will be abandoned\\."]\
+-    "check for unwindonsignal off message"
++    "check for unwind-on-signal off message"
+ 
+ # And reverse - turn off again.
+-gdb_test_no_output "set unwindonsignal off"
++gdb_test_no_output "set unwind-on-signal off"
+ 
+ # Check that it is actually turned off.
+-gdb_test "show unwindonsignal" \
++gdb_test "show unwind-on-signal" \
+     "signal is received while in a call dummy is off.*" \
+     "turn off unwind on signal"
+ 
+ # Check to see if new behaviour interferes with
+ # normal signal handling in inferior function calls.
+ gdb_test "p exceptions.raise_signal(1)" \
+-    "To change this behavior use \"set unwindonsignal on\".*" \
+-    "check for unwindonsignal on message"
++    "To change this behavior use \"set unwind-on-signal on\".*" \
++    "check for unwind-on-signal on message"
+diff --git a/gdb/testsuite/gdb.fortran/function-calls.exp b/gdb/testsuite/gdb.fortran/function-calls.exp
+--- a/gdb/testsuite/gdb.fortran/function-calls.exp
++++ b/gdb/testsuite/gdb.fortran/function-calls.exp
+@@ -44,7 +44,7 @@ if {![runto [gdb_get_line_number "post_init"]]} {
+ }
+ 
+ # Use inspired by gdb.base/callfuncs.exp.
+-gdb_test_no_output "set unwindonsignal on"
++gdb_test_no_output "set unwind-on-signal on"
+ 
+ # Baseline: function and subroutine call with no arguments.
+ gdb_test "p no_arg()" " = .TRUE."
+diff --git a/gdb/testsuite/gdb.mi/mi-condbreak-fail.exp b/gdb/testsuite/gdb.mi/mi-condbreak-fail.exp
+--- a/gdb/testsuite/gdb.mi/mi-condbreak-fail.exp
++++ b/gdb/testsuite/gdb.mi/mi-condbreak-fail.exp
+@@ -43,7 +43,7 @@ proc run_test { unwind_on_signal } {
+ 	return
+     }
+ 
+-    mi_gdb_test "-gdb-set unwindonsignal ${unwind_on_signal}" {\^done} \
++    mi_gdb_test "-gdb-set unwind-on-signal ${unwind_on_signal}" {\^done} \
+ 	"set unwind-on-signal"
+ 
+     # Create the conditional breakpoint.
+@@ -70,7 +70,7 @@ proc run_test { unwind_on_signal } {
+ 		 "&\"The program being debugged received signal SIGSEGV, Segmentation fault\\\\n\"" \
+ 		 "&\"while in a function called from GDB\\.  GDB has restored the context\\\\n\"" \
+ 		 "&\"to what it was before the call\\.  To change this behavior use\\\\n\"" \
+-		 "&\"\\\\\"set unwindonsignal off\\\\\"\\.  Evaluation of the expression containing\\\\n\"" \
++		 "&\"\\\\\"set unwind-on-signal off\\\\\"\\.  Evaluation of the expression containing\\\\n\"" \
+ 		 "&\"the function \\(cond_fail\\) will be abandoned\\.\\\\n\"" \
+ 		 "=breakpoint-modified,bkpt={number=\"$bpnum\",type=\"breakpoint\",\[^\r\n\]+times=\"1\",\[^\r\n\]+}" \
+ 		 "~\"\\\\n\"" \
+@@ -92,7 +92,7 @@ proc run_test { unwind_on_signal } {
+ 		 "&\"Error in testing condition for breakpoint $bpnum:\\\\n\"" \
+ 		 "&\"The program being debugged was signaled while in a function called from GDB\\.\\\\n\"" \
+ 		 "&\"GDB remains in the frame where the signal was received\\.\\\\n\"" \
+-		 "&\"To change this behavior use \\\\\"set unwindonsignal on\\\\\"\\.\\\\n\"" \
++		 "&\"To change this behavior use \\\\\"set unwind-on-signal on\\\\\"\\.\\\\n\"" \
+ 		 "&\"Evaluation of the expression containing the function\\\\n\"" \
+ 		 "&\"\\(cond_fail\\) will be abandoned\\.\\\\n\"" \
+ 		 "&\"When the function is done executing, GDB will silently stop\\.\\\\n\"" \
+diff --git a/gdb/testsuite/gdb.mi/mi-condbreak-throw.exp b/gdb/testsuite/gdb.mi/mi-condbreak-throw.exp
+--- a/gdb/testsuite/gdb.mi/mi-condbreak-throw.exp
++++ b/gdb/testsuite/gdb.mi/mi-condbreak-throw.exp
+@@ -103,7 +103,7 @@ proc run_test { unwind_on_exception } {
+ 		 "&\"Error in testing condition for breakpoint $bpnum:\\\\n\"" \
+ 		 "&\"The program being debugged was signaled while in a function called from GDB\\.\\\\n\"" \
+ 		 "&\"GDB remains in the frame where the signal was received\\.\\\\n\"" \
+-		 "&\"To change this behavior use \\\\\"set unwindonsignal on\\\\\"\\.\\\\n\"" \
++		 "&\"To change this behavior use \\\\\"set unwind-on-signal on\\\\\"\\.\\\\n\"" \
+ 		 "&\"Evaluation of the expression containing the function\\\\n\"" \
+ 		 "&\"\\(cond_throw\\(\\)\\) will be abandoned\\.\\\\n\"" \
+ 		 "&\"When the function is done executing, GDB will silently stop\\.\\\\n\"" \
+diff --git a/gdb/testsuite/gdb.mi/mi-syn-frame.exp b/gdb/testsuite/gdb.mi/mi-syn-frame.exp
+--- a/gdb/testsuite/gdb.mi/mi-syn-frame.exp
++++ b/gdb/testsuite/gdb.mi/mi-syn-frame.exp
+@@ -94,7 +94,7 @@ mi_gdb_test "409-stack-list-frames 0 0" \
+ # 
+ 
+ mi_gdb_test "410-data-evaluate-expression bar()" \
+-  ".*410\\^error,msg=\"The program being debugged was signaled while in a function called from GDB.\\\\nGDB remains in the frame where the signal was received.\\\\nTo change this behavior use \\\\\"set unwindonsignal on\\\\\".\\\\nEvaluation of the expression containing the function\\\\n\\(bar\\) will be abandoned.\\\\nWhen the function is done executing, GDB will silently stop.\"" \
++  ".*410\\^error,msg=\"The program being debugged was signaled while in a function called from GDB.\\\\nGDB remains in the frame where the signal was received.\\\\nTo change this behavior use \\\\\"set unwind-on-signal on\\\\\".\\\\nEvaluation of the expression containing the function\\\\n\\(bar\\) will be abandoned.\\\\nWhen the function is done executing, GDB will silently stop.\"" \
+   "call inferior function which raises exception"
+ 
+ mi_gdb_test "411-stack-list-frames" "411\\^done,stack=\\\[frame=\{level=\"0\",addr=\"$hex\",func=\"bar\",file=\".*mi-syn-frame.c\",fullname=\"${fullname_syntax}${srcfile}\",line=\"$decimal\",arch=\"$any\"},frame=\{level=\"1\",addr=\"$hex\",func=\"<function called from gdb>\"\},frame=\{level=\"2\",addr=\"$hex\",func=\"main\",file=\".*mi-syn-frame.c\",fullname=\"${fullname_syntax}${srcfile}\",line=\"$decimal\",arch=\"$any\"}.*\\\]" "backtrace from inferior function at exception"
+diff --git a/gdb/testsuite/gdb.threads/infcall-from-bp-cond-simple.exp b/gdb/testsuite/gdb.threads/infcall-from-bp-cond-simple.exp
+--- a/gdb/testsuite/gdb.threads/infcall-from-bp-cond-simple.exp
++++ b/gdb/testsuite/gdb.threads/infcall-from-bp-cond-simple.exp
+@@ -173,7 +173,7 @@ proc_with_prefix run_bp_cond_segfaults { target_async target_non_stop } {
+ 	     "Error in testing condition for breakpoint ${bp_1_num}:" \
+ 	     "The program being debugged was signaled while in a function called from GDB\\." \
+ 	     "GDB remains in the frame where the signal was received\\." \
+-	     "To change this behavior use \"set unwindonsignal on\"\\." \
++	     "To change this behavior use \"set unwind-on-signal on\"\\." \
+ 	     "Evaluation of the expression containing the function" \
+ 	     "\\(function_that_segfaults\\) will be abandoned\\." \
+ 	     "When the function is done executing, GDB will silently stop\\."]
+diff --git a/gdb/testsuite/gdb.threads/thread-unwindonsignal.exp b/gdb/testsuite/gdb.threads/thread-unwindonsignal.exp
+--- a/gdb/testsuite/gdb.threads/thread-unwindonsignal.exp
++++ b/gdb/testsuite/gdb.threads/thread-unwindonsignal.exp
+@@ -13,7 +13,7 @@
+ # You should have received a copy of the GNU General Public License
+ # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ 
+-# Test use of unwindonsignal when a hand function call that gets interrupted
++# Test use of unwind-on-signal when a hand function call that gets interrupted
+ # by a signal in another thread.
+ 
+ set NR_THREADS 4
+@@ -49,12 +49,12 @@ gdb_test "continue" \
+ # We want the main thread (hand_call_with_signal) and
+ # thread 1 (sigabrt_handler) to both run.
+ 
+-# Do turn on unwindonsignal.
++# Do turn on unwind-on-signal.
+ # We want to test gdb handling of the current thread changing when
+ # unwindonsignal is in effect.
+-gdb_test_no_output "set unwindonsignal on" \
++gdb_test_no_output "set unwind-on-signal on" \
+ 	"setting unwindonsignal"
+-gdb_test "show unwindonsignal" \
++gdb_test "show unwind-on-signal" \
+ 	"Unwinding of stack .* is on." \
+ 	"showing unwindonsignal"
+ 
