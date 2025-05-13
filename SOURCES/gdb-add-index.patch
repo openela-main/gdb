@@ -52,11 +52,11 @@ diff --git a/gdb/contrib/gdb-add-index.sh b/gdb/contrib/gdb-add-index.sh
 +# exit.
 +if test -z "$GDB"; then
 +    for possible_gdb in /usr/bin/gdb.minimal gdb /usr/libexec/gdb; do
-+        if ! which "$possible_gdb" >/dev/null 2>&1; then
++        if ! command -v "$possible_gdb" >/dev/null 2>&1; then
 +            continue
 +        fi
 +
-+        possible_gdb=$(which "$possible_gdb")
++        possible_gdb=$(command -v "$possible_gdb")
 +
 +        if ! test -x "$possible_gdb"; then
 +            continue
