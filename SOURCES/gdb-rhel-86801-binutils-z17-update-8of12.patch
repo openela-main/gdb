@@ -1,0 +1,25 @@
+From FEDORA_PATCHES Mon Sep 17 00:00:00 2001
+From: Jens Remus <jremus@linux.ibm.com>
+Date: Mon, 28 Apr 2025 11:23:22 -0700
+Subject: gdb-rhel-86801-binutils-z17-update-8of12.patch
+
+;; Backkport "s390: Align opcodes to lower-case"
+;; (Jens Remus, RHEL-86801)
+
+opcodes/
+	* s390-opc.txt (rdp): Change opcode to lower-case.
+
+Signed-off-by: Jens Remus <jremus@linux.ibm.com>
+
+diff --git a/opcodes/s390-opc.txt b/opcodes/s390-opc.txt
+--- a/opcodes/s390-opc.txt
++++ b/opcodes/s390-opc.txt
+@@ -2061,7 +2061,7 @@ e60000000055 vcnf VRR_VV0UU2 "vector fp convert to nnp" arch14 zarch
+ 
+ # Reset-DAT-Protection Facility
+ 
+-b98B rdp RRF_RURR2 "reset dat protection" arch14 zarch optparm
++b98b rdp RRF_RURR2 "reset dat protection" arch14 zarch optparm
+ 
+ # BEAR-Enhancement Facility
+ 

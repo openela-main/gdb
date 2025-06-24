@@ -57,7 +57,7 @@ Version:              14.2
 
 # The release always contains a leading reserved number, start it at 1.
 # `upstream' is not a part of `name' to stay fully rpm dependencies compatible for the testing.
-Release:              4%{?dist}
+Release:              4.1%{?dist}
 
 License:              GPL-3.0-or-later AND BSD-3-Clause AND FSFAP AND LGPL-2.1-or-later AND GPL-2.0-or-later AND LGPL-2.0-or-later AND LicenseRef-Fedora-Public-Domain AND GFDL-1.3-or-later AND LGPL-2.0-or-later WITH GCC-exception-2.0 AND GPL-3.0-or-later WITH GCC-exception-3.1 AND GPL-2.0-or-later WITH GNU-compiler-exception
 # Do not provide URL for snapshots as the file lasts there only for 2 days.
@@ -1250,7 +1250,11 @@ fi
 %endif
 
 %changelog
-* Wed Jan  9 2025 Keith Seitz <keiths@redhat.com> - 14.2-4.el9
+* Tue May  6 2025 Keith Seitz <keiths@redhat.com> - 14.2-4.1.el9
+- Backport IBM z17 binutils patches
+  (Jens Remus et al, RHEL-89863)
+
+* Thu Jan  9 2025 Keith Seitz <keiths@redhat.com> - 14.2-4.el9
 - gdb-add-index.patch: Use "command -v" instead of "which".
   (Keith Seitz, RHEL-73209)
 

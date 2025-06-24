@@ -1,0 +1,244 @@
+From FEDORA_PATCHES Mon Sep 17 00:00:00 2001
+From: Jens Remus <jremus@linux.ibm.com>
+Date: Mon, 28 Apr 2025 11:23:22 -0700
+Subject: gdb-rhel-86801-binutils-z17-update-3of12.patch
+
+;; Backkport "s390: Add missing extended mnemonics"
+;; (Jens Remus, RHEL-86801)
+
+Add extended mnemonics specified in the z/Architecture Principles of
+Operation [1] and z/Architecture Reference Summary [2], that were
+previously missing from the opcode table.
+
+The following added extended mnemonics are synonyms to a base mnemonic
+and therefore disassemble into their base mnemonic:
+jc, jcth, lfi, llgfi, llghi
+
+The following added extended mnemonics are more specific than their base
+mnemonic and therefore disassemble into the added extended mnemonic:
+risbhgz, risblgz, rnsbgt, rosbgt, rxsbgt
+
+The following added extended mnemonics are more specific than their base
+mnemonic, but disassemble into their base mnemonic due to design
+constraints:
+notr, notgr
+
+The missing extended mnemonic jl* conditional jump long flavors cannot
+be added, as they would clash with the existing non-standard extended
+mnemonic j* conditional jump flavors jle and jlh. The missing extended
+mnemonic jlc jump long conditional is not added, as the related jl*
+flavors cannot be added.
+Note that these missing jl* conditional jump long flavors are already
+defined as non-standard jg* flavors instead. While the related missing
+extended mnemonic jlc could be added as non-standard jgc instead it is
+forgone in favor of not adding further non-standard mnemonics.
+
+The missing extended mnemonics sllhh, sllhl, slllh, srlhh, srlhl, and
+srllh cannot be implemented using the current design, as they require
+computed operands. For that reason the following missing extended
+mnemonics are not added as well, as they fall into the same category of
+instructions that operate on high and low words of registers. They
+should better be added together, not to confuse the user, which of those
+instructions are currently implemented or not.
+lhhr, lhlr, llhfr, llchhr, llchlr, llclhr, llhhhr, llhhlr, llhlhr,
+nhhr, nhlr, nlhr, ohhr, ohlr, olhr, xhhr, xhlr, xlhr
+
+[1] IBM z/Architecture Principles of Operation, SA22-7832-13, IBM z16,
+    https://publibfp.dhe.ibm.com/epubs/pdf/a227832d.pdf
+[2] IBM z/Architecture Reference Summary, SA22-7871-11,
+    https://www.ibm.com/support/pages/sites/default/files/2022-09/SA22-7871-11.pdf
+
+opcodes/
+	* s390-opc.c: Define operand formats R_CP16_28, U6_18, and
+	  U5_27. Define instruction formats RIE_RRUUU3, RIE_RRUUU4,
+	  and RRF_R0RR4.
+	* s390-opc.txt: Add extended mnemonics jc, jcth, lfi, llgfi,
+	  llghi, notgr, notr, risbhgz, risblgz, rnsbgt, rosbgt, and
+	  rxsbgt.
+
+gas/
+	* config/tc-s390.c: Add support to insert operand for format
+	  R_CP16_28, reusing existing logic for format V_CP16_12.
+	* testsuite/gas/s390/esa-g5.s: Add test for extended mnemonic
+	  jc.
+	* testsuite/gas/s390/esa-g5.d: Likewise.
+	* testsuite/gas/s390/zarch-z900.s: Add test for extended
+	  mnemonic llghi.
+	* testsuite/gas/s390/zarch-z900.d: Likewise.
+	* testsuite/gas/s390/zarch-z9-109.s: Add tests for extended
+	  mnemonics lfi and llgfi.
+	* testsuite/gas/s390/zarch-z9-109.d: Likewise.
+	* testsuite/gas/s390/zarch-z10.s: Add tests for extended
+	  mnemonics rnsbgt, rosbgt, and rxsbgt.
+	* testsuite/gas/s390/zarch-z10.d: Likewise.
+	* testsuite/gas/s390/zarch-z196.s: Add tests for extended
+	  mnemonics jcth, risbhgz, and risblgz.
+	* testsuite/gas/s390/zarch-z196.d: Likewise.
+	* testsuite/gas/s390/zarch-arch13.s: Add tests for extended
+	  mnemonics notr and notgr.
+	* testsuite/gas/s390/zarch-arch13.d: Likewise.
+
+Signed-off-by: Jens Remus <jremus@linux.ibm.com>
+Reviewed-by: Andreas Krebbel <krebbel@linux.ibm.com>
+
+diff --git a/opcodes/s390-opc.c b/opcodes/s390-opc.c
+--- a/opcodes/s390-opc.c
++++ b/opcodes/s390-opc.c
+@@ -62,7 +62,9 @@ const struct s390_operand s390_operands[] =
+   { 4, 24, S390_OPERAND_GPR },
+ #define R_28        (R_24 + 1)    /* GPR starting at position 28 */
+   { 4, 28, S390_OPERAND_GPR },
+-#define R_32        (R_28 + 1)    /* GPR starting at position 32 */
++#define R_CP16_28   (R_28 + 1)    /* GPR starting at position 28 */
++  { 4, 28, S390_OPERAND_GPR | S390_OPERAND_CP16 }, /* with a copy at pos 16 */
++#define R_32        (R_CP16_28+1) /* GPR starting at position 32 */
+   { 4, 32, S390_OPERAND_GPR },
+ 
+ /* General purpose register pair operands.  */
+@@ -222,9 +224,13 @@ const struct s390_operand s390_operands[] =
+   { 4, 36, 0 },
+ #define U8_8        (U4_36 + 1)   /* 8 bit unsigned value starting at 8 */
+   { 8, 8, 0 },
+-#define U8_16       (U8_8 + 1)    /* 8 bit unsigned value starting at 16 */
++#define U6_18       (U8_8 + 1)    /* 6 bit unsigned value starting at 18 */
++  { 6, 18, 0 },
++#define U8_16       (U6_18 + 1)   /* 8 bit unsigned value starting at 16 */
+   { 8, 16, 0 },
+-#define U6_26       (U8_16 + 1)   /* 6 bit unsigned value starting at 26 */
++#define U5_27       (U8_16 + 1)   /* 5 bit unsigned value starting at 27 */
++  { 5, 27, 0 },
++#define U6_26       (U5_27 + 1)   /* 6 bit unsigned value starting at 26 */
+   { 6, 26, 0 },
+ #define U8_24       (U6_26 + 1)   /* 8 bit unsigned value starting at 24 */
+   { 8, 24, 0 },
+@@ -289,7 +295,7 @@ static inline void unused_s390_operands_static_asserts(void)
+       p - pc relative
+       r - general purpose register
+       re - gpr extended operand, a valid general purpose register pair
+-      u - unsigned integer, 4, 8, 16 or 32 bit
++      u - unsigned integer, 4, 6, 8, 16 or 32 bit
+       m - mode field, 4 bit
+       0 - operand skipped.
+       The order of the letters reflects the layout of the format in
+@@ -325,7 +331,9 @@ static inline void unused_s390_operands_static_asserts(void)
+ #define INSTR_RIE_R0U0     6, { R_8,U16_16,0,0,0,0 }             /* e.g. clfitne */
+ #define INSTR_RIE_RUI0     6, { R_8,I16_16,U4_12,0,0,0 }         /* e.g. lochi */
+ #define INSTR_RIE_RRUUU    6, { R_8,R_12,U8_16,U8_24,U8_32,0 }   /* e.g. rnsbg */
+-#define INSTR_RIE_RRUUU2   6, { R_8,R_12,U8_16,U6_26,U8_32,0 }   /* e.g. rnsbg */
++#define INSTR_RIE_RRUUU2   6, { R_8,R_12,U8_16,U6_26,U8_32,0 }   /* e.g. risbgz */
++#define INSTR_RIE_RRUUU3   6, { R_8,R_12,U8_16,U5_27,U8_32,0 }   /* e.g. risbhg */
++#define INSTR_RIE_RRUUU4   6, { R_8,R_12,U6_18,U8_24,U8_32,0 }   /* e.g. rnsbgt */
+ #define INSTR_RIL_0P       6, { J32_16,0,0,0,0 }                 /* e.g. jg    */
+ #define INSTR_RIL_RP       6, { R_8,J32_16,0,0,0,0 }             /* e.g. brasl */
+ #define INSTR_RIL_UP       6, { U4_8,J32_16,0,0,0,0 }            /* e.g. brcl  */
+@@ -374,6 +382,7 @@ static inline void unused_s390_operands_static_asserts(void)
+ #define INSTR_RRF_R0RR2    4, { R_24,R_28,R_16,0,0,0 }           /* e.g. ark   */
+ #define INSTR_RRF_R0RER    4, { RE_24,R_28,R_16,0,0,0 }          /* e.g. mgrk  */
+ #define INSTR_RRF_R0RR3    4, { R_24,R_28,R_16,0,0,0 }           /* e.g. selrz */
++#define INSTR_RRF_R0RR4    4, { R_24,R_CP16_28,0,0,0,0 }         /* e.g. notr  */
+ #define INSTR_RRF_U0FF     4, { F_24,U4_16,F_28,0,0,0 }          /* e.g. fidbr */
+ #define INSTR_RRF_U0FEFE   4, { FE_24,U4_16,FE_28,0,0,0 }        /* e.g. fixbr */
+ #define INSTR_RRF_U0RF     4, { R_24,U4_16,F_28,0,0,0 }          /* e.g. cfebr */
+@@ -550,6 +559,8 @@ static inline void unused_s390_operands_static_asserts(void)
+ #define MASK_RIE_RUI0     { 0xff, 0x00, 0x00, 0x00, 0xff, 0xff }
+ #define MASK_RIE_RRUUU    { 0xff, 0x00, 0x00, 0x00, 0x00, 0xff }
+ #define MASK_RIE_RRUUU2   { 0xff, 0x00, 0x00, 0xc0, 0x00, 0xff }
++#define MASK_RIE_RRUUU3   { 0xff, 0x00, 0x00, 0xe0, 0x00, 0xff }
++#define MASK_RIE_RRUUU4   { 0xff, 0x00, 0xc0, 0x00, 0x00, 0xff }
+ #define MASK_RIL_0P       { 0xff, 0xff, 0x00, 0x00, 0x00, 0x00 }
+ #define MASK_RIL_RP       { 0xff, 0x0f, 0x00, 0x00, 0x00, 0x00 }
+ #define MASK_RIL_UP       { 0xff, 0x0f, 0x00, 0x00, 0x00, 0x00 }
+@@ -598,6 +609,7 @@ static inline void unused_s390_operands_static_asserts(void)
+ #define MASK_RRF_R0RR2    { 0xff, 0xff, 0x00, 0x00, 0x00, 0x00 }
+ #define MASK_RRF_R0RER    { 0xff, 0xff, 0x00, 0x00, 0x00, 0x00 }
+ #define MASK_RRF_R0RR3    { 0xff, 0xff, 0x0f, 0x00, 0x00, 0x00 }
++#define MASK_RRF_R0RR4    { 0xff, 0xff, 0x00, 0x00, 0x00, 0x00 }
+ #define MASK_RRF_U0FF     { 0xff, 0xff, 0x0f, 0x00, 0x00, 0x00 }
+ #define MASK_RRF_U0FEFE   { 0xff, 0xff, 0x0f, 0x00, 0x00, 0x00 }
+ #define MASK_RRF_U0RF     { 0xff, 0xff, 0x0f, 0x00, 0x00, 0x00 }
+diff --git a/opcodes/s390-opc.txt b/opcodes/s390-opc.txt
+--- a/opcodes/s390-opc.txt
++++ b/opcodes/s390-opc.txt
+@@ -272,6 +272,7 @@ a701 tml RI_RU "test under mask low" g5 esa,zarch
+ 4700 nop RX_0RRD "no operation" g5 esa,zarch optparm
+ 4700 b*8 RX_0RRD "conditional branch" g5 esa,zarch
+ 47f0 b RX_0RRD "unconditional branch" g5 esa,zarch
++a704 jc RI_UP "conditional jump" g5 esa,zarch
+ a704 jnop RI_0P "nop jump" g5 esa,zarch
+ a704 j*8 RI_0P "conditional jump" g5 esa,zarch
+ a704 br*8 RI_0P "conditional jump" g5 esa,zarch
+@@ -473,8 +474,10 @@ eb0000000080 icmh RSE_RURD "insert characters under mask high" z900 zarch
+ a702 tmhh RI_RU "test under mask high high" z900 zarch
+ a703 tmhl RI_RU "test under mask high low" z900 zarch
+ c004 brcl RIL_UP "branch relative on condition long" z900 esa,zarch
++# jlc omitted due to missing jl* (see jl*8) and not added as non-standard jgc
+ c004 jgnop RIL_0P "nop jump long" z900 esa,zarch
+ c004 jg*8 RIL_0P "conditional jump long" z900 esa,zarch
++# jl*8 omitted due to clash with non-standard j*8 flavors jle and jlh; exists as non-standard jg*8 instead
+ c004 br*8l RIL_0P "conditional jump long" z900 esa,zarch
+ c0f4 jg RIL_0P "unconditional jump long" z900 esa,zarch
+ c0f4 brul RIL_0P "unconditional jump long" z900 esa,zarch
+@@ -523,6 +526,7 @@ a50c llihh RI_RU "load logical immediate high high" z900 zarch
+ a50d llihl RI_RU "load logical immediate high low" z900 zarch
+ a50e llilh RI_RU "load logical immediate low high" z900 zarch
+ a50f llill RI_RU "load logical immediate low low" z900 zarch
++a50f llghi RI_RU "load logical immediate" z900 zarch
+ b2b1 stfl S_RD "store facility list" z900 esa,zarch
+ b2b2 lpswe S_RD "load psw extended" z900 zarch
+ b90d dsgr RRE_RER "divide single 64" z900 zarch
+@@ -750,6 +754,7 @@ c006 xihf RIL_RU "exclusive or immediate high" z9-109 zarch
+ c007 xilf RIL_RU "exclusive or immediate low" z9-109 zarch
+ c008 iihf RIL_RU "insert immediate high" z9-109 zarch
+ c009 iilf RIL_RU "insert immediate low" z9-109 zarch
++c009 lfi RIL_RU "insert immediate 32" z9-109 zarch
+ # z9-109 misc instruction
+ b983 flogr RRE_RER "find leftmost one" z9-109 zarch
+ e30000000012 lt RXY_RRRD "load and test 32" z9-109 zarch
+@@ -767,6 +772,7 @@ b995 llhr RRE_RR "load logical halfword 32" z9-109 zarch
+ b985 llghr RRE_RR "load logical halfword 64" z9-109 zarch
+ c00e llihf RIL_RU "load logical immediate high" z9-109 zarch
+ c00f llilf RIL_RU "load logical immediate low" z9-109 zarch
++c00f llgfi RIL_RU "load logical immediate" z9-109 zarch
+ c00c oihf RIL_RU "or immediate high" z9-109 zarch
+ c00d oilf RIL_RU "or immediate low" z9-109 zarch
+ c205 slfi RIL_RU "subtract logical immediate 32" z9-109 zarch
+@@ -969,8 +975,11 @@ c200 msgfi RIL_RI "multiply single immediate (64)" z10 zarch
+ e30000000036 pfd RXY_URRD "prefetch data" z10 zarch
+ c602 pfdrl RIL_UP "prefetch data relative long" z10 zarch
+ ec0000000054 rnsbg RIE_RRUUU "rotate then and selected bits" z10 zarch optparm
++ec0080000054 rnsbgt RIE_RRUUU4 "rotate then and selected bits and test results" z10 zarch optparm
+ ec0000000057 rxsbg RIE_RRUUU "rotate then exclusive or selected bits" z10 zarch optparm
++ec0080000057 rxsbgt RIE_RRUUU4 "rotate then exclusive or selected bits and test results" z10 zarch optparm
+ ec0000000056 rosbg RIE_RRUUU "rotate then or selected bits" z10 zarch optparm
++ec0080000056 rosbgt RIE_RRUUU4 "rotate then or selected bits and test results" z10 zarch optparm
+ ec0000000055 risbg RIE_RRUUU "rotate then insert selected bits" z10 zarch optparm
+ ec0000800055 risbgz RIE_RRUUU2 "rotate then insert selected bits and zero remaining bits" z10 zarch optparm
+ c40f strl RIL_RP "store relative long (32)" z10 zarch
+@@ -1003,6 +1012,7 @@ b9da alhhlr RRF_R0RR2 "add logical high low" z196 zarch
+ cc0a alsih RIL_RI "add logical with signed immediate high with cc" z196 zarch
+ cc0b alsihn RIL_RI "add logical with signed immediate high no cc" z196 zarch
+ cc06 brcth RIL_RP "branch relative on count high" z196 zarch
++cc06 jcth RIL_RP "jump on count high" z196 zarch
+ b9cd chhr RRE_RR "compare high high" z196 zarch
+ b9dd chlr RRE_RR "compare high low" z196 zarch
+ e300000000cd chf RXY_RRRD "compare high" z196 zarch
+@@ -1017,7 +1027,9 @@ e300000000ca lfh RXY_RRRD "load high" z196 zarch
+ e300000000c2 llch RXY_RRRD "load logical character high" z196 zarch
+ e300000000c6 llhh RXY_RRRD "load logical halfword high" z196 zarch
+ ec000000005d risbhg RIE_RRUUU "rotate then insert selected bits high" z196 zarch optparm
++ec000080005d risbhgz RIE_RRUUU3 "rotate then insert selected bits high and zero remaining bits" z196 zarch optparm
+ ec0000000051 risblg RIE_RRUUU "rotate then insert selected bits low" z196 zarch optparm
++ec0000800051 risblgz RIE_RRUUU3 "rotate then insert selected bits low and zero remaining bits" z196 zarch optparm
+ e300000000c3 stch RXY_RRRD "store character high" z196 zarch
+ e300000000c7 sthh RXY_RRRD "store halfword high" z196 zarch
+ e300000000cb stfh RXY_RRRD "store high" z196 zarch
+@@ -1913,7 +1925,9 @@ e50a mvcrl SSE_RDRD "move right to left" arch13 zarch
+ b974 nnrk RRF_R0RR2 "nand 32 bit" arch13 zarch
+ b964 nngrk RRF_R0RR2 "nand 64 bit" arch13 zarch
+ b976 nork RRF_R0RR2 "nor 32 bit" arch13 zarch
++b976 notr RRF_R0RR4 "not 32 bit" arch13 zarch
+ b966 nogrk RRF_R0RR2 "nor 64 bit" arch13 zarch
++b966 notgr RRF_R0RR4 "not 64 bit" arch13 zarch
+ b977 nxrk RRF_R0RR2 "not exclusive or 32 bit" arch13 zarch
+ b967 nxgrk RRF_R0RR2 "not exclusive or 64 bit" arch13 zarch
+ b975 ocrk RRF_R0RR2 "or with complement 32 bit" arch13 zarch
