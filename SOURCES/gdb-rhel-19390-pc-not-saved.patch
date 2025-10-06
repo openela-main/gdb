@@ -1,0 +1,379 @@
+From FEDORA_PATCHES Mon Sep 17 00:00:00 2001
+From: Andrew Burgess <aburgess@redhat.com>
+Date: Wed, 24 Jan 2024 13:52:59 +0000
+Subject: gdb-rhel-19390-pc-not-saved.patch
+
+;;gdb/unwinders: better support for $pc not saved
+;;(Andrew Burgess, RHEL-19390)
+
+This started with a Red Hat bug report which can be seen here:
+
+  https://bugzilla.redhat.com/show_bug.cgi?id=1850710
+
+The problem reported here was using GDB on GNU/Linux for S390, the
+user stepped into JIT generated code.  As they enter the JIT code GDB
+would report 'PC not saved', and this same message would be reported
+after each step/stepi.
+
+Additionally, the user had 'set disassemble-next-line on', and once
+they entered the JIT code this output was not displayed, nor were any
+'display' directives displayed.
+
+The user is not making use of the JIT plugin API to provide debug
+information.  But that's OK, they aren't expecting any source level
+debug here, they are happy to use 'stepi', but the missing 'display'
+directives are a problem, as is the constant 'PC not saved' (error)
+message.
+
+What is happening here is that as GDB is failing to find any debug
+information for the JIT generated code, it is falling back on to the
+S390 prologue unwinder to try and unwind frame #0.  Unfortunately,
+without being able to identify the function boundaries, the S390
+prologue scanner can't help much, in fact, it doesn't even suggest an
+arbitrary previous $pc value (some targets that use a link-register
+will, by default, assume the link-register contains the previous $pc),
+instead the S390 will just say, "sorry, I have no previous $pc value".
+
+The result of this is that when GDB tries to find frame #1 we end
+throwing an error from frame_unwind_pc (the 'PC not saved' error).
+This error is not caught anywhere except at the top-level interpreter
+loop, and so we end up skipping all the 'display' directive handling.
+
+While thinking about this, I wondered, could I trigger the same error
+using the Python Unwinder API?  What happens if a Python unwinder
+claims a frame, but then fails to provide a previous $pc value?
+
+Turns out that exactly the same thing happens, which is great, as that
+means we now have a way to reproduce this bug on any target.  And so
+the test included with this patch does just this.  I have a Python
+unwinder that claims a frame, but doesn't provide any previous
+register values.
+
+I then do two tests, first I stop in the claimed frame (i.e. frame #0
+is the frame that can't be unwound), I perform a few steps, and check
+the backtrace.  And second, I stop in a child of the problem
+frame (i.e. frame #1 is the frame that can't be unwound), and from
+here I check the backtrace.
+
+While all this is going on I have a 'display' directive in place, and
+each time GDB stops I check that the display directive triggers.
+
+Additionally, when checking the backtrace, I am checking that the
+backtrace finishes with the message 'Backtrace stopped: frame did not
+save the PC'.
+
+As for the fix I chose to add a call to frame_unwind_pc directly to
+get_prev_frame_always_1.  Calling frame_unwind_pc will cache the
+unwound $pc value, so this doesn't add much additional work as
+immediately after the new frame_unwind_pc call, we call
+get_prev_frame_maybe_check_cycle, which actually generates the
+previous frame, which will always (I think) require a call to
+frame_unwind_pc anyway.
+
+The reason for adding the frame_unwind_pc call into
+get_prev_frame_always_1, is that if the frame_unwind_pc call fails we
+want to set the frames 'stop_reason', and get_prev_frame_always_1
+seems to be the place where this is done, so I wanted to keep the new
+stop_reason setting code next to all the existing stop_reason setting
+code.
+
+Additionally, once we enter get_prev_frame_maybe_check_cycle we
+actually create the previous frame, then, if it turns out that the
+previous frame can't be created we need to remove the frame .. this
+seemed more complex than just making the check in
+get_prev_frame_always_1.
+
+With this fix in place the original S390 bug is fixed, and also the
+test added in this commit, that uses the Python API, is also fixed.
+
+Reviewed-By: Kevin Buettner <kevinb@redhat.com>
+
+diff --git a/gdb/frame.c b/gdb/frame.c
+--- a/gdb/frame.c
++++ b/gdb/frame.c
+@@ -2422,6 +2422,38 @@ get_prev_frame_always_1 (frame_info_ptr this_frame)
+ 	}
+     }
+ 
++  /* Ensure we can unwind the program counter of THIS_FRAME.  */
++  try
++    {
++      /* Calling frame_unwind_pc for the sentinel frame relies on the
++	 current_frame being set, which at this point it might not be if we
++	 are in the process of setting the current_frame after a stop (see
++	 get_current_frame).
++
++	 The point of this check is to ensure that the unwinder for
++	 THIS_FRAME can actually unwind the $pc, which we assume the
++	 sentinel frame unwinder can always do (it's just a read from the
++	 machine state), so we only call frame_unwind_pc for frames other
++	 than the sentinel (level -1) frame.
++
++	 Additionally, we don't actually care about the value of the
++	 unwound $pc, just that the call completed successfully.  */
++      if (this_frame->level >= 0)
++	frame_unwind_pc (this_frame);
++    }
++  catch (const gdb_exception_error &ex)
++    {
++      if (ex.error == NOT_AVAILABLE_ERROR || ex.error == OPTIMIZED_OUT_ERROR)
++	{
++	  frame_debug_printf ("  -> nullptr // no saved PC");
++	  this_frame->stop_reason = UNWIND_NO_SAVED_PC;
++	  this_frame->prev = nullptr;
++	  return nullptr;
++	}
++
++      throw;
++    }
++
+   return get_prev_frame_maybe_check_cycle (this_frame);
+ }
+ 
+diff --git a/gdb/testsuite/gdb.base/pc-not-saved.c b/gdb/testsuite/gdb.base/pc-not-saved.c
+new file mode 100644
+--- /dev/null
++++ b/gdb/testsuite/gdb.base/pc-not-saved.c
+@@ -0,0 +1,48 @@
++/* This testcase is part of GDB, the GNU debugger.
++
++   Copyright 2024 Free Software Foundation, Inc.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++volatile int global_var = 0;
++
++void
++other_func (void)
++{
++  /* Nothing.  */
++}
++
++void
++break_bt_here (void)
++{
++  /* This is all nonsense; just filler so this function has a body.  */
++  if (global_var != 99)
++    global_var++;
++  if (global_var != 98)
++    global_var++;
++  if (global_var != 97)
++    global_var++;
++  if (global_var != 96)
++    global_var++;
++  other_func ();
++  if (global_var != 95)
++    global_var++;
++}
++
++int
++main (void)
++{
++  break_bt_here ();
++  return 0;
++}
+diff --git a/gdb/testsuite/gdb.base/pc-not-saved.exp b/gdb/testsuite/gdb.base/pc-not-saved.exp
+new file mode 100644
+--- /dev/null
++++ b/gdb/testsuite/gdb.base/pc-not-saved.exp
+@@ -0,0 +1,113 @@
++# Copyright 2024 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++# Test how GDB handles a frame in which the previous-pc value is not
++# available.  Specifically, check that the backtrace correctly reports
++# why the backtrace is truncated, and ensure that 'display' directives
++# still work when 'stepi'-ing through the frame.
++#
++# We do this by registering a Python unwinder which doesn't provide
++# any previous register values.
++
++require allow_python_tests
++
++standard_testfile
++
++if { [prepare_for_testing "failed to prepare" ${testfile} ${srcfile}] } {
++    return
++}
++
++set remote_python_file \
++    [gdb_remote_download host "${srcdir}/${subdir}/${testfile}.py"]
++
++if { ![runto "break_bt_here"] } {
++    return
++}
++
++# Figuring out the correct frame-id from a Python unwinder is hard.
++# We need to know the function's start address (not too hard), and the
++# stack address on entry to the function, which is much harder to
++# figure out in a cross-target way.
++#
++# So instead we run without any Python unwinder in place and use
++# 'maint print frame-id' to record the frame-id.  We then restart GDB,
++# load the Python unwinder, and tell it to use the frame-id we
++# recorded here.
++set pc unknown
++set cfa unknown
++gdb_test_multiple "maintenance print frame-id" "store break_bt_here frame-id" {
++    -re -wrap "frame-id for frame #0: \\{stack=($hex),code=($hex),\[^\}\]+\\}" {
++	set cfa $expect_out(1,string)
++	set pc $expect_out(1,string)
++    }
++}
++gdb_assert { ![string equal $cfa unknown] } \
++    "check we read the frame's CFA"
++
++gdb_assert { ![string equal $pc unknown] } \
++    "check we read the frame's PC"
++
++# Restart and load the Python unwinder script.
++clean_restart $binfile
++gdb_test_no_output "source ${remote_python_file}" "load python file"
++
++# Tell the Python unwinder to use the frame-id we cached above.
++gdb_test_no_output "python set_break_bt_here_frame_id($pc, $cfa)"
++
++# Run up to the function which the unwinder will claim.
++if { ![runto "break_bt_here"] } {
++    return
++}
++
++# Print the backtrace.  Check that the reason for stopping the
++# backtrace is that the previous $pc is not available.
++gdb_test "bt" \
++    [multi_line \
++	 "^#0  break_bt_here \\(\\) at \[^\r\n\]+" \
++	 "Backtrace stopped: frame did not save the PC"] \
++    "backtrace from break_bt_here function"
++
++# Ensure we can stepi.
++gdb_test "stepi" \
++    "(:?$hex\\s+)?$decimal\\s+\[^\r\n\]+" \
++    "stepi without a display in place"
++
++# Setup a 'display' directive.
++gdb_test "display/i \$pc" \
++    [multi_line \
++	 "^1: x/i \\\$pc" \
++	 "=> $hex <break_bt_here(:?\\+$decimal)?>:\\s+\[^\r\n\]+"]
++
++# Step again, check the 'display' directive is shown.
++gdb_test "stepi" \
++    [multi_line \
++	 "(:?$hex\\s+)?$decimal\\s+\[^\r\n\]+" \
++	 "1: x/i \\\$pc" \
++	 "=> $hex <break_bt_here(:?\\+$decimal)?>:\\s+\[^\r\n\]+"] \
++    "stepi with a display in place"
++
++# Continue to a function that is called from within break_bt_here.
++# The Python unwinder will then be claiming frame #1.
++gdb_breakpoint other_func
++gdb_continue_to_breakpoint "continue to other_func"
++
++# Print the backtrace and check that the reason for stopping the
++# backtrace is that the previous $pc is not available.
++gdb_test "bt" \
++    [multi_line \
++	 "#0  other_func \\(\\) at \[^\r\n\]+" \
++	 "#1  (:?$hex in )?break_bt_here \\(\\) at \[^\r\n\]+" \
++	 "Backtrace stopped: frame did not save the PC"] \
++    "backtrace from other_func function"
+diff --git a/gdb/testsuite/gdb.base/pc-not-saved.py b/gdb/testsuite/gdb.base/pc-not-saved.py
+new file mode 100644
+--- /dev/null
++++ b/gdb/testsuite/gdb.base/pc-not-saved.py
+@@ -0,0 +1,71 @@
++# Copyright (C) 2024 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++import gdb
++from gdb.unwinder import Unwinder, FrameId
++
++# Cached FrameId.  See set_break_bt_here_frame_id for details.
++break_bt_here_frame_id = None
++
++
++def set_break_bt_here_frame_id(pc, cfa):
++    """Call this to pre-calculate the FrameId for the frame our unwinder
++    is going to claim, this avoids us having to actually figure out a
++    frame-id within the unwinder, something which is going to be hard
++    to do in a cross-target way.
++
++    Instead we first run the test without the Python unwinder in
++    place, use 'maint print frame-id' to record the frame-id, then,
++    after loading this Python script, we all this function to record
++    the frame-id that the unwinder should use."""
++    global break_bt_here_frame_id
++    break_bt_here_frame_id = FrameId(cfa, pc)
++
++
++class break_unwinding(Unwinder):
++
++    """An unwinder for the function 'break_bt_here'.  This unwinder will
++    claim any frame for the function in question, but doesn't provide
++    any unwound register values.  Importantly, we don't provide a
++    previous $pc value, this means that if we are stopped in
++    'break_bt_here' then we should fail to unwind beyond frame #0."""
++
++    def __init__(self):
++        Unwinder.__init__(self, "break unwinding")
++
++    def __call__(self, pending_frame):
++        pc_desc = pending_frame.architecture().registers().find("pc")
++        pc = pending_frame.read_register(pc_desc)
++
++        if pc.is_optimized_out:
++            return None
++
++        block = gdb.block_for_pc(pc)
++        if block == None:
++            return None
++        func = block.function
++        if func == None:
++            return None
++        if str(func) != "break_bt_here":
++            return None
++
++        global break_bt_here_frame_id
++        if break_bt_here_frame_id is None:
++            return None
++
++        return pending_frame.create_unwind_info(break_bt_here_frame_id)
++
++
++gdb.unwinder.register_unwinder(None, break_unwinding(), True)

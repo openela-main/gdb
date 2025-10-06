@@ -1,0 +1,281 @@
+# Check distro name is included in the version output.
+Patch001: gdb-6.3-rh-testversion-20041202.patch
+
+# Add a wrapper script to GDB that implements pstack using the
+# --readnever option.
+#=push
+Patch002: gdb-6.3-gstack-20050411.patch
+
+# Support TLS symbols (+`errno' suggestion if no pthread is found) (BZ 185337).
+#=push+jan: It should be replaced by Infinity project.
+Patch003: gdb-6.5-bz185337-resolve-tls-without-debuginfo-v2.patch
+
+# Test sideeffects of skipping ppc .so libs trampolines (BZ 218379).
+#=fedoratest
+Patch004: gdb-6.5-bz218379-ppc-solib-trampoline-test.patch
+
+# Allow running `/usr/bin/gcore' with provided but inaccessible tty (BZ 229517).
+#=fedoratest
+Patch005: gdb-6.6-bz229517-gcore-without-terminal.patch
+
+# Avoid too long timeouts on failing cases of "annota1.exp annota3.exp".
+#=fedoratest
+Patch006: gdb-6.6-testsuite-timeouts.patch
+
+# Support for stepping over PPC atomic instruction sequences (BZ 237572).
+#=fedoratest
+Patch007: gdb-6.6-bz237572-ppc-atomic-sequence-test.patch
+
+# Test kernel VDSO decoding while attaching to an i386 process.
+#=fedoratest
+Patch008: gdb-6.3-attach-see-vdso-test.patch
+
+# Test leftover zombie process (BZ 243845).
+#=fedoratest
+Patch009: gdb-6.5-bz243845-stale-testing-zombie-test.patch
+
+# New locating of the matching binaries from the pure core file (build-id).
+#=push+jan
+Patch010: gdb-6.6-buildid-locate.patch
+
+# Fix loading of core files without build-ids but with build-ids in executables.
+# Load strictly build-id-checked core files only if no executable is specified
+# (Jan Kratochvil, RH BZ 1339862).
+#=push+jan
+Patch011: gdb-6.6-buildid-locate-solib-missing-ids.patch
+
+#=push+jan
+Patch012: gdb-6.6-buildid-locate-rpm.patch
+
+# Test PPC hiding of call-volatile parameter register.
+#=fedoratest
+Patch013: gdb-6.7-ppc-clobbered-registers-O2-test.patch
+
+# Test gcore memory and time requirements for large inferiors.
+#=fedoratest
+Patch014: gdb-6.5-gcore-buffer-limit-test.patch
+
+# Test GCORE for shmid 0 shared memory mappings.
+#=fedoratest: But it is broken anyway, sometimes the case being tested is not reproducible.
+Patch015: gdb-6.3-mapping-zero-inode-test.patch
+
+# Test a crash on libraries missing the .text section.
+#=fedoratest
+Patch016: gdb-6.5-section-num-fixup-test.patch
+
+# Fix resolving of variables at locations lists in prelinked libs (BZ 466901).
+#=fedoratest
+Patch017: gdb-6.8-bz466901-backtrace-full-prelinked.patch
+
+# New test for step-resume breakpoint placed in multiple threads at once.
+#=fedoratest
+Patch018: gdb-simultaneous-step-resume-breakpoint-test.patch
+
+# Fix GNU/Linux core open: Can't read pathname for load map: Input/output error.
+# Fix regression of undisplayed missing shared libraries caused by a fix for.
+#=fedoratest: It should be in glibc: libc-alpha: <20091004161706.GA27450@.*>
+Patch019: gdb-core-open-vdso-warning.patch
+
+# Fix follow-exec for C++ programs (bugreported by Martin Stransky).
+#=fedoratest
+Patch020: gdb-archer-next-over-throw-cxx-exec.patch
+
+# Workaround librpm BZ 643031 due to its unexpected exit() calls (BZ 642879).
+#=push+jan
+Patch021: gdb-6.6-buildid-locate-rpm-librpm-workaround.patch
+
+# [delayed-symfile] Test a backtrace regression on CFIs without DIE (BZ 614604).
+#=fedoratest
+Patch022: gdb-test-bt-cfi-without-die.patch
+
+# Verify GDB Python built-in function gdb.solib_address exists (BZ # 634108).
+#=fedoratest
+Patch023: gdb-bz634108-solib_address.patch
+
+# [archer-tromey-delayed-symfile] New test gdb.dwarf2/dw2-aranges.exp.
+#=fedoratest
+Patch024: gdb-test-dw2-aranges.patch
+
+# Workaround PR libc/14166 for inferior calls of strstr.
+#=fedoratest: Compatibility with RHELs (unchecked which ones).
+Patch025: gdb-glibc-strstr-workaround.patch
+
+# Testcase for `Setting solib-absolute-prefix breaks vDSO' (BZ 818343).
+#=fedoratest
+Patch026: gdb-rhbz-818343-set-solib-absolute-prefix-testcase.patch
+
+# Import regression test for `gdb/findvar.c:417: internal-error:
+# read_var_value: Assertion `frame' failed.' (RH BZ 947564) from RHEL 6.5.
+#=fedoratest
+Patch027: gdb-rhbz947564-findvar-assertion-frame-failed-testcase.patch
+
+# Fix 'memory leak in infpy_read_memory()' (RH BZ 1007614)
+#=fedoratest
+Patch028: gdb-rhbz1007614-memleak-infpy_read_memory-test.patch
+
+# Fix 'gdb gives highly misleading error when debuginfo pkg is present,
+# but not corresponding binary pkg' (RH BZ 981154).
+#=push+jan
+Patch029: gdb-6.6-buildid-locate-misleading-warning-missing-debuginfo-rhbz981154.patch
+
+# Testcase for '[SAP] Recursive dlopen causes SAP HANA installer to
+# crash.' (RH BZ 1156192).
+#=fedoratest
+Patch030: gdb-rhbz1156192-recursive-dlopen-test.patch
+
+# Fix '`catch syscall' doesn't work for parent after `fork' is called'
+# (Philippe Waroquiers, RH BZ 1149205).
+#=fedoratest
+Patch031: gdb-rhbz1149205-catch-syscall-after-fork-test.patch
+
+# Fix '[ppc64] and [s390x] wrong prologue skip on -O2 -g code' (Jan
+# Kratochvil, RH BZ 1084404).
+#=fedoratest
+Patch032: gdb-rhbz1084404-ppc64-s390x-wrong-prologue-skip-O2-g-3of3.patch
+
+# Force libncursesw over libncurses to match the includes (RH BZ 1270534).
+#=push+jan
+Patch033: gdb-fedora-libncursesw.patch
+
+# [aarch64] Fix hardware watchpoints (RH BZ 1261564).
+#=fedoratest
+Patch034: gdb-rhbz1261564-aarch64-hw-watchpoint-test.patch
+
+# Add messages suggesting more recent RHEL gdbserver (RH BZ 1321114).
+#=fedora
+Patch035: gdb-container-rh-pkg.patch
+
+# [dts+el7] [x86*] Bundle linux_perf.h for libipt (RH BZ 1256513).
+#=fedora
+Patch036: gdb-linux_perf-bundle.patch
+
+# Update gdb-add-index.sh such that, when the GDB environment
+# variable is not set, the script is smarter than just looking for
+# 'gdb' in the $PATH.
+#
+# The actual search order is now: /usr/bin/gdb.minimal, gdb (in the
+# $PATH), then /usr/libexec/gdb.
+#
+# For the rationale of looking for gdb.minimal see:
+#
+#   https://fedoraproject.org/wiki/Changes/Minimal_GDB_in_buildroot
+#
+#=fedora
+Patch037: gdb-add-index.patch
+
+# Back-port upstream commit 1f0fab7ff86 as part of a fix for
+# non-deterministic gdb-index generation (RH BZ 2232086).
+Patch038: gdb-rhbz2232086-refactor-selftest-support.patch
+
+# Back-port upstream commit aa19bc1d259 as part of a fix for
+# non-deterministic gdb-index generation (RH BZ 2232086).
+Patch039: gdb-rhbz-2232086-reduce-size-of-gdb-index.patch
+
+# Back-port upstream commit acc117b57f7 as part of a fix for
+# non-deterministic gdb-index generation (RH BZ 2232086).
+Patch040: gdb-rhbz-2232086-cpp-ify-mapped-symtab.patch
+
+# Back-port upstream commit aff250145af as part of a fix for
+# non-deterministic gdb-index generation (RH BZ 2232086).
+Patch041: gdb-rhbz-2232086-generate-gdb-index-consistently.patch
+
+# Back-port upstream commit 3644f41dc80 as part of a fix for
+# non-deterministic gdb-index generation (RH BZ 2232086).
+Patch042: gdb-rhbz-2232086-generate-dwarf-5-index-consistently.patch
+
+
+Patch043: gdb-rhbz2250652-gdbpy_gil.patch
+
+
+Patch044: gdb-rhbz2250652-avoid-PyOS_ReadlineTState.patch
+
+
+Patch045: gdb-ftbs-swapped-calloc-args.patch
+
+# Backport upstream workaround for GCC 14 problem which cause assertion
+# failures in GDB.
+Patch046: gdb-rhbz2261580-intrusive_list-assertion-fix.patch
+
+# Backport "gdb: s390: Add arch14 record/replay support"
+# (Andreas Arnez, RHEL-36225)
+Patch047: gdb-rhel-36225-add-arch14-record.patch
+
+# Backport "PowerPC: Add support for Power11 options"
+# (Peter Bergner, RHEL-36518)
+Patch048: gdb-rhel-36518-add-power11-support.patch
+
+# Update x86 disassembler
+Patch049: gdb-rhel-36527-apx-disasm.patch
+
+#Revert "gdb: remove unnecessary parameter wait_ptid from do_target_wait"
+#(Andrew Burgess, RHEL-13298)
+Patch050: gdb-rhel-13298-inferior-funcall-bp-condition-1-of-5.patch
+
+#gdb: fix b/p conditions with infcalls in multi-threaded inferiors
+#(Andrew Burgess, RHEL-13298)
+Patch051: gdb-rhel-13298-inferior-funcall-bp-condition-2-of-5.patch
+
+#gdb: add timeouts for inferior function calls
+#(Andrew Burgess, RHEL-13298)
+Patch052: gdb-rhel-13298-inferior-funcall-bp-condition-3-of-5.patch
+
+#gdb: introduce unwind-on-timeout setting
+#(Andrew Burgess, RHEL-13298)
+Patch053: gdb-rhel-13298-inferior-funcall-bp-condition-4-of-5.patch
+
+#gdb: rename unwindonsignal to unwind-on-signal
+#(Andrew Burgess, RHEL-13298)
+Patch054: gdb-rhel-13298-inferior-funcall-bp-condition-5-of-5.patch
+
+#gdb/unwinders: better support for $pc not saved
+#(Andrew Burgess, RHEL-19390)
+Patch055: gdb-rhel-19390-pc-not-saved.patch
+
+# Backkport "s390: Make operand table indices relative to each other"
+# (Jens Remus, RHEL-86801)
+Patch056: gdb-rhel-86801-binutils-z17-update-1of12.patch
+
+# Backkport "s390: Align optional operand definition to specs"
+# (Jens Remus, RHEL-86801)
+Patch057: gdb-rhel-86801-binutils-z17-update-2of12.patch
+
+# Backkport "s390: Add missing extended mnemonics"
+# (Jens Remus, RHEL-86801)
+Patch058: gdb-rhel-86801-binutils-z17-update-3of12.patch
+
+# Backkport "s390: Correct prno instruction name"
+# (Jens Remus, RHEL-86801)
+Patch059: gdb-rhel-86801-binutils-z17-update-4of12.patch
+
+# Backkport "Fix building for the s390 target with clang"
+# (Nick Clifton, RHEL-86801)
+Patch060: gdb-rhel-86801-binutils-z17-update-5of12.patch
+
+# Backkport "s390: Align letter case of instruction descriptions"
+# (Jens Remus, RHEL-86801)
+Patch061: gdb-rhel-86801-binutils-z17-update-6of12.patch
+
+# Backkport "s390: Provide IBM z16 (arch14) instruction descriptions"
+# (Jens Remus, RHEL-86801)
+Patch062: gdb-rhel-86801-binutils-z17-update-7of12.patch
+
+# Backkport "s390: Align opcodes to lower-case"
+# (Jens Remus, RHEL-86801)
+Patch063: gdb-rhel-86801-binutils-z17-update-8of12.patch
+
+# Backkport "s390: Simplify (dis)assembly of insn operands with const bits"
+# (Jens Remus, RHEL-86801)
+Patch064: gdb-rhel-86801-binutils-z17-update-9of12.patch
+
+# Backkport "s390: Relax risbg[n]z, risb{h|l}gz, {rns|ros|rxs}bgt operand constraints"
+# (Jens Remus, RHEL-86801)
+Patch065: gdb-rhel-86801-binutils-z17-update-10of12.patch
+
+# Backkport "s390: Add arch15 instructions"
+# (Andreas Krebbel, RHEL-86801)
+Patch066: gdb-rhel-86801-binutils-z17-update-11of12.patch
+
+# Backkport "s390: Add support for z17 as CPU name"
+# (Jens Remus, RHEL-86801)
+Patch067: gdb-rhel-86801-binutils-z17-update-12of12.patch
+

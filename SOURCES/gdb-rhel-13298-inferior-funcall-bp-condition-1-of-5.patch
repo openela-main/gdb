@@ -1,0 +1,70 @@
+From FEDORA_PATCHES Mon Sep 17 00:00:00 2001
+From: Andrew Burgess <aburgess@redhat.com>
+Date: Mon, 9 May 2022 17:51:54 +0100
+Subject: gdb-rhel-13298-inferior-funcall-bp-condition-1-of-5.patch
+
+;;Revert "gdb: remove unnecessary parameter wait_ptid from do_target_wait"
+;;(Andrew Burgess, RHEL-13298)
+
+This reverts commit ac0d67ed1dcf470bad6a3bc4800c2ddc9bedecca.
+
+There was nothing wrong with the commit which I'm reverting here, but
+it removed some functionality that will be needed for a later commit;
+that is, the ability for GDB to ask for events from a specific ptid_t
+via the do_target_wait function.
+
+In a follow up commit, this functionality will be used to implement
+inferior function calls in multi-threaded inferiors.
+
+This is not a straight revert of the above commit.  Reverting the
+above commit replaces a 'nullptr' with 'NULL', I've gone in and
+changed that, preserving the 'nullptr'.
+
+Reviewed-By: Tankut Baris Aktemur <tankut.baris.aktemur@intel.com>
+Tested-By: Luis Machado <luis.machado@arm.com>
+Tested-By: Keith Seitz <keiths@redhat.com>
+
+diff --git a/gdb/infrun.c b/gdb/infrun.c
+--- a/gdb/infrun.c
++++ b/gdb/infrun.c
+@@ -3946,7 +3946,8 @@ do_target_wait_1 (inferior *inf, ptid_t ptid,
+    more events.  Polls for events from all inferiors/targets.  */
+ 
+ static bool
+-do_target_wait (execution_control_state *ecs, target_wait_flags options)
++do_target_wait (ptid_t wait_ptid, execution_control_state *ecs,
++		target_wait_flags options)
+ {
+   int num_inferiors = 0;
+   int random_selector;
+@@ -3956,9 +3957,10 @@ do_target_wait (execution_control_state *ecs, target_wait_flags options)
+      polling the rest of the inferior list starting from that one in a
+      circular fashion until the whole list is polled once.  */
+ 
+-  auto inferior_matches = [] (inferior *inf)
++  auto inferior_matches = [&wait_ptid] (inferior *inf)
+     {
+-      return inf->process_target () != nullptr;
++      return (inf->process_target () != nullptr
++	      && ptid_t (inf->pid).matches (wait_ptid));
+     };
+ 
+   /* First see how many matching inferiors we have.  */
+@@ -3997,7 +3999,7 @@ do_target_wait (execution_control_state *ecs, target_wait_flags options)
+ 
+   auto do_wait = [&] (inferior *inf)
+   {
+-    ecs->ptid = do_target_wait_1 (inf, minus_one_ptid, &ecs->ws, options);
++    ecs->ptid = do_target_wait_1 (inf, wait_ptid, &ecs->ws, options);
+     ecs->target = inf->process_target ();
+     return (ecs->ws.kind () != TARGET_WAITKIND_IGNORE);
+   };
+@@ -4427,7 +4429,7 @@ fetch_inferior_event ()
+        the event.  */
+     scoped_disable_commit_resumed disable_commit_resumed ("handling event");
+ 
+-    if (!do_target_wait (&ecs, TARGET_WNOHANG))
++    if (!do_target_wait (minus_one_ptid, &ecs, TARGET_WNOHANG))
+       {
+ 	infrun_debug_printf ("do_target_wait returned no event");
+ 	disable_commit_resumed.reset_and_commit ();

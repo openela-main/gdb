@@ -1,0 +1,48 @@
+From FEDORA_PATCHES Mon Sep 17 00:00:00 2001
+From: Peter Bergner <bergner@linux.ibm.com>
+Date: Fri, 9 Feb 2024 10:51:30 -0600
+Subject: gdb-rhel-36518-add-power11-support.patch
+
+;; Backport "PowerPC: Add support for Power11 options"
+;; (Peter Bergner, RHEL-36518)
+
+opcodes/
+        * ppc-dis.c (ppc_opts): Add "power11" and "pwr11" entries.
+        (powerpc_init_dialect): Default to "power11".
+
+diff --git a/opcodes/ppc-dis.c b/opcodes/ppc-dis.c
+--- a/opcodes/ppc-dis.c
++++ b/opcodes/ppc-dis.c
+@@ -208,6 +208,11 @@ struct ppc_mopt ppc_opts[] = {
+ 		| PPC_OPCODE_POWER7 | PPC_OPCODE_POWER8 | PPC_OPCODE_POWER9
+ 		| PPC_OPCODE_POWER10 | PPC_OPCODE_ALTIVEC | PPC_OPCODE_VSX),
+     0 },
++  { "power11", (PPC_OPCODE_PPC | PPC_OPCODE_ISEL | PPC_OPCODE_64
++		| PPC_OPCODE_POWER4 | PPC_OPCODE_POWER5 | PPC_OPCODE_POWER6
++		| PPC_OPCODE_POWER7 | PPC_OPCODE_POWER8 | PPC_OPCODE_POWER9
++		| PPC_OPCODE_POWER10 | PPC_OPCODE_ALTIVEC | PPC_OPCODE_VSX),
++    0 },
+   { "libresoc",(PPC_OPCODE_PPC | PPC_OPCODE_ISEL | PPC_OPCODE_64
+ 		| PPC_OPCODE_POWER4 | PPC_OPCODE_POWER5 | PPC_OPCODE_POWER6
+ 		| PPC_OPCODE_POWER7 | PPC_OPCODE_POWER8 | PPC_OPCODE_POWER9
+@@ -267,6 +272,11 @@ struct ppc_mopt ppc_opts[] = {
+ 		| PPC_OPCODE_POWER7 | PPC_OPCODE_POWER8 | PPC_OPCODE_POWER9
+ 		| PPC_OPCODE_POWER10 | PPC_OPCODE_ALTIVEC | PPC_OPCODE_VSX),
+     0 },
++  { "pwr11",   (PPC_OPCODE_PPC | PPC_OPCODE_ISEL | PPC_OPCODE_64
++		| PPC_OPCODE_POWER4 | PPC_OPCODE_POWER5 | PPC_OPCODE_POWER6
++		| PPC_OPCODE_POWER7 | PPC_OPCODE_POWER8 | PPC_OPCODE_POWER9
++		| PPC_OPCODE_POWER10 | PPC_OPCODE_ALTIVEC | PPC_OPCODE_VSX),
++    0 },
+   { "pwrx",    PPC_OPCODE_POWER | PPC_OPCODE_POWER2,
+     0 },
+   { "raw",     PPC_OPCODE_PPC,
+@@ -396,7 +406,7 @@ powerpc_init_dialect (struct disassemble_info *info)
+       break;
+     default:
+       if (info->arch == bfd_arch_powerpc)
+-	dialect = ppc_parse_cpu (dialect, &sticky, "power10") | PPC_OPCODE_ANY;
++	dialect = ppc_parse_cpu (dialect, &sticky, "power11") | PPC_OPCODE_ANY;
+       else
+ 	dialect = ppc_parse_cpu (dialect, &sticky, "pwr");
+       break;
