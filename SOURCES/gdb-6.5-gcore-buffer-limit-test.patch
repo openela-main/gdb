@@ -52,7 +52,7 @@ diff --git a/gdb/testsuite/gdb.base/gcore-excessive-memory.exp b/gdb/testsuite/g
 new file mode 100644
 --- /dev/null
 +++ b/gdb/testsuite/gdb.base/gcore-excessive-memory.exp
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,99 @@
 +# Copyright 2008 Free Software Foundation, Inc.
 +
 +# This program is free software; you can redistribute it and/or modify
@@ -69,7 +69,10 @@ new file mode 100644
 +# along with this program; if not, write to the Free Software
 +# Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 +
-+require !use_gdb_stub
++if {[use_gdb_stub]} {
++    untested "skipping test because of use_gdb_stub"
++    return -1
++}
 +
 +set testfile gcore-excessive-memory
 +set srcfile ${testfile}.c

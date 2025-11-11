@@ -1,10 +1,10 @@
 From FEDORA_PATCHES Mon Sep 17 00:00:00 2001
 From: Jens Remus <jremus@linux.ibm.com>
 Date: Wed, 9 Apr 2025 08:59:24 +0200
-Subject: gdb-rhel-86801-binutils-z17-update-12of12.patch
+Subject: gdb-rhel-50069-support-z17.patch
 
-;; Backkport "s390: Add support for z17 as CPU name"
-;; (Jens Remus, RHEL-86801)
+;; Backport "s390: Add support for z17 as CPU name"
+;; (Jens Remus, RHEL-50069)
 
 So far IBM z17 was identified as arch15.  Add the real name, as it has
 been announced. [1]
@@ -26,7 +26,7 @@ Signed-off-by: Jens Remus <jremus@linux.ibm.com>
 diff --git a/opcodes/s390-mkopc.c b/opcodes/s390-mkopc.c
 --- a/opcodes/s390-mkopc.c
 +++ b/opcodes/s390-mkopc.c
-@@ -384,7 +384,8 @@ main (void)
+@@ -443,7 +443,8 @@ main (void)
        else if (strcmp (cpu_string, "z16") == 0
  	       || strcmp (cpu_string, "arch14") == 0)
  	min_cpu = S390_OPCODE_ARCH14;
@@ -35,4 +35,4 @@ diff --git a/opcodes/s390-mkopc.c b/opcodes/s390-mkopc.c
 +	       || strcmp (cpu_string, "arch15") == 0)
  	min_cpu = S390_OPCODE_ARCH15;
        else {
- 	fprintf (stderr, "Couldn't parse cpu string %s\n", cpu_string);
+ 	print_error ("Mnemonic \"%s\": Couldn't parse CPU string: %s\n",
