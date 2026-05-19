@@ -113,3 +113,10 @@ Patch025: gdb-rhel-7329-vandps-clobbers-registers-12-of-13.patch
 # (Tom de Vries, RHEL-7329)
 Patch026: gdb-rhel-7329-vandps-clobbers-registers-13-of-13.patch
 
+# Backport of three upstream patches.  The first two relate to index
+# generation, while the third relates to symbol lookup, but is needed
+# so that the tests from the earlier two patches will pass.
+#
+# (Tom Tromey and Andrew Burgess, RHEL-150992)
+Patch027: gdb-rhel-150992-index-generation-fixes.patch
+

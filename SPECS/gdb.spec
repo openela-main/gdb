@@ -45,7 +45,7 @@ Version: 16.3
 
 # The release always contains a leading reserved number, start it at 1.
 # `upstream' is not a part of `name' to stay fully rpm dependencies compatible for the testing.
-Release: 2%{?dist}
+Release: 3%{?dist}
 
 License: GPL-3.0-or-later AND BSD-3-Clause AND FSFAP AND LGPL-2.1-or-later AND GPL-2.0-or-later AND LGPL-2.0-or-later AND LicenseRef-Fedora-Public-Domain AND GFDL-1.3-or-later AND LGPL-2.0-or-later WITH GCC-exception-2.0 AND GPL-3.0-or-later WITH GCC-exception-3.1 AND GPL-2.0-or-later WITH GNU-compiler-exception AND MIT
 # Do not provide URL for snapshots as the file lasts there only for 2 days.
@@ -941,6 +941,10 @@ fi
 # endif scl
 
 %changelog
+* Thu Feb 19 2026 Keith Seitz <keiths@redhat.com> - 16.3-3.el10
+- Include gdb-index-generation-fixes.patch (renamed).
+  (Tom Tromey and Andrew Burgess, RHEL-150992)
+
 * Mon Jun 02 2025 Guinevere Larsen <guinevere@redhat.com> - 16.3-2.el10
 - Backport fixes to decoding AMD64 instructions
   Resolves: RHEL-93581
