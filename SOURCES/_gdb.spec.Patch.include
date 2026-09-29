@@ -120,3 +120,7 @@ Patch026: gdb-rhel-7329-vandps-clobbers-registers-13-of-13.patch
 # (Tom Tromey and Andrew Burgess, RHEL-150992)
 Patch027: gdb-rhel-150992-index-generation-fixes.patch
 
+# Backport upstream commit 5423bf3011daea5e52c2af1d9fb70abc1d947b55
+# (Tom de Vries, RHEL190102)
+Patch028: gdb-rhel-190102-read_member_functions.patch
+
