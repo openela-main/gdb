@@ -120,3 +120,7 @@ Patch026: gdb-rhel-7329-vandps-clobbers-registers-13-of-13.patch
 # (Tom Tromey and Andrew Burgess, RHEL-86890)
 Patch027: gdb-rhel-86890-index-generation-fixes.patch
 
+# Backport "Fix out-of-bounds write in read_member_functions"
+# (Tom de Vries, RHEL-190107)
+Patch028: gdb-rhel-190107-read_member_functions.patch
+

@@ -25,3 +25,4 @@
 %patch -p1 -P025
 %patch -p1 -P026
 %patch -p1 -P027
+%patch -p1 -P028
