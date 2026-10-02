@@ -828,3 +828,7 @@ Patch202: gdb-rhbz2156888-copy_type-assertion-1of2.patch
 # (Tom deVries, RHBZ 2156888)
 Patch203: gdb-rhbz2156888-copy_type-assertion-2of2.patch
 
+# Backport "Fix out-of-bounds write in read_member_functions"
+# (Tom de Vries, RHEL-190110)
+Patch204: gdb-rhel-190110-read_member_functions.patch
+

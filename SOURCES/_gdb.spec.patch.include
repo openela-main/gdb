@@ -201,3 +201,4 @@
 %patch201 -p1
 %patch202 -p1
 %patch203 -p1
+%patch204 -p1
