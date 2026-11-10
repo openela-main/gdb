@@ -1,0 +1,123 @@
+From FEDORA_PATCHES Mon Sep 17 00:00:00 2001
+From: Paul Eggert <eggert@cs.ucla.edu>
+Date: Sun, 22 Mar 2026 14:08:47 -0700
+Subject: gdb-backport-rhel-159887-getpkt-overflow.patch
+
+;; Backport of upstream commit 9d3cf9efd51ebae3f45bb49e3544cb7eeb63a138
+;; to fix a security weakness.
+
+gdbserver: fix unlikely getpkt buffer overflow
+
+This problem was reported by Manish Sharma.
+
+Within gdbserver, in getpkt, there is no bounds checking as we parse
+the incoming packet.  An unexpectedly large packet can therefore
+overflow the allocated buffer.  Fixed by adding bounds checking.
+
+If a packet is too long then in ACK mode we send out the NAK, but then
+immediately return -1 as the result from getpkt.  Currently the only
+thing that GDB can do when it sees a '-' (NAK) is resend the packet.
+If the original packet was too long then the resent packet will also
+be too long.  gdbserver would then be stuck re-reading the incoming
+too long packet.  Now GDB does give up after 3 retries, but this means
+gdbserver is relying on GDB to give up sending, when in reality,
+gdbserver knows it's not going to be able to recover.  So I propose
+that gdbserver should just give up once it sees a packet that is too
+long.
+
+While looking at the error handling in this case I noticed that in the
+noack_mode case, if we get a packet with a bad checksum, or a packet
+that is too long, getpkt will return success and gdbserver will try to
+interpret whatever it has.  This seems like a bad idea.  So I've
+updated this code path to also return an error.
+
+Then there are a couple of places where we had a comment like this:
+
+  /* FIXME:  Eventually add buffer overflow checking (to getpkt?)  */
+
+Now that getpkt does have buffer overflow checking, I've removed these
+comments.
+
+Approved-By: Andrew Burgess <aburgess@redhat.com>
+
+diff --git a/gdbserver/remote-utils.cc b/gdbserver/remote-utils.cc
+--- a/gdbserver/remote-utils.cc
++++ b/gdbserver/remote-utils.cc
+@@ -950,6 +950,7 @@ getpkt (char *buf)
+ 	    return -1;
+ 	}
+ 
++      bool fits_in_buf = true;
+       bp = buf;
+       while (1)
+ 	{
+@@ -958,7 +959,11 @@ getpkt (char *buf)
+ 	    return -1;
+ 	  if (c == '#')
+ 	    break;
+-	  *bp++ = c;
++	  /* The buffer is always allocated as 'PBUFSIZ + 1' so we know
++	     that this write will always be within the buffer.  */
++	  *bp = c;
++	  fits_in_buf = bp - buf < PBUFSIZ;
++	  bp += (fits_in_buf ? 1: 0);
+ 	  csum += c;
+ 	}
+       *bp = 0;
+@@ -966,22 +971,30 @@ getpkt (char *buf)
+       c1 = fromhex (readchar ());
+       c2 = fromhex (readchar ());
+ 
+-      if (csum == (c1 << 4) + c2)
++      unsigned char sentsum = (c1 << 4) + c2;
++      bool csum_ok = csum == sentsum;
++      if (csum_ok && fits_in_buf)
+ 	break;
+ 
++      if (!csum_ok)
++	fprintf (stderr, "Bad checksum, sentsum=0x%x, csum=0x%x, buf=%s\n",
++		 sentsum, csum, buf);
++      if (!fits_in_buf)
++	fprintf (stderr, "Packet too long\n");
+       if (cs.noack_mode)
+ 	{
+-	  fprintf (stderr,
+-		   "Bad checksum, sentsum=0x%x, csum=0x%x, "
+-		   "buf=%s [no-ack-mode, Bad medium?]\n",
+-		   (c1 << 4) + c2, csum, buf);
+-	  /* Not much we can do, GDB wasn't expecting an ack/nac.  */
+-	  break;
++	  fprintf (stderr, "[no-ack-mode, Bad medium?]\n");
++	  /* Not much we can do, GDB wasn't expecting an ack/nak, just
++	     return an error to indicate the packet was bad.  */
++	  return -1;
+ 	}
+ 
+-      fprintf (stderr, "Bad checksum, sentsum=0x%x, csum=0x%x, buf=%s\n",
+-	       (c1 << 4) + c2, csum, buf);
+-      if (write_prim ("-", 1) != 1)
++      /* Send '-' (NAK) back to GDB.  If that fails, or if the incoming
++	 packet was too long, then return an error.  For the packet too
++	 long case there's no point repeating the loop, all GDB can do is
++	 resend the original packet, which will be too long again, and
++	 we'll be stuck in this loop forever.  */
++      if (write_prim ("-", 1) != 1 || !fits_in_buf)
+ 	return -1;
+     }
+ 
+@@ -1476,7 +1489,6 @@ look_up_one_symbol (const char *name, CORE_ADDR *addrp, int may_ask_gdb)
+   if (putpkt (cs.own_buf) < 0)
+     return -1;
+ 
+-  /* FIXME:  Eventually add buffer overflow checking (to getpkt?)  */
+   len = getpkt (cs.own_buf);
+   if (len < 0)
+     return -1;
+@@ -1606,7 +1618,6 @@ relocate_instruction (CORE_ADDR *to, CORE_ADDR oldloc)
+   if (putpkt (cs.own_buf) < 0)
+     return -1;
+ 
+-  /* FIXME:  Eventually add buffer overflow checking (to getpkt?)  */
+   len = getpkt (cs.own_buf);
+   if (len < 0)
+     return -1;

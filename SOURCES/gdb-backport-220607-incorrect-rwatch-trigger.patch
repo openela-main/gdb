@@ -1,0 +1,2238 @@
+From FEDORA_PATCHES Mon Sep 17 00:00:00 2001
+From: Andrew Burgess <aburgess@redhat.com>
+Date: Fri, 11 Jul 2025 11:52:53 -0400
+Subject: gdb-backport-220607-incorrect-rwatch-trigger.patch
+
+;; Backport upstream commit b0196f0c87e13cc73039039b89b27580823dd573
+;; to fix Red Hat tests
+
+gdb/aarch64: change target_ops::stopped_data_address API
+
+At Red Hat we have an out of tree AArch64 watchpoint test which broke
+after this commit:
+
+  commit cf16ab724a41e4cbaf723b5633d4e7b29f61372b
+  Date:   Tue Mar 12 17:08:18 2024 +0100
+
+      [gdb/tdep] Fix gdb.base/watch-bitfields.exp on aarch64
+
+The problem with AArch64 hardware watchpoints is that they (as I
+understand it) are restricted to a minimum of 8 bytes.
+
+The problem is that current AArch64 hardware has imprecise hardware
+watchpoint events due to unaligned accesses.  The address reported for
+the watchpoint event will depend on the access size.  As a result, it
+is possible that multiple watchpoints could potentially account for a
+single watchpoint event, which is the case in the RH test.  GDB can
+then miss-identify which watchpoint actually triggered.
+
+Prior to the above commit the RH test was passing.  However, the test
+was relying on, in the case of ambiguity, GDB selecting the first
+created watchpoint.  That behaviour changed with the above commit.
+Now GDB favours reporting non write breakpoints, and will only report
+a write breakpoint if no non-write breakpoint exists in the same
+region.
+
+I originally posted a patch to try and tweak the existing logic to
+restore enough of the original behaviour that the RH test would pass,
+this can be found here (2 iterations):
+
+  https://inbox.sourceware.org/gdb-patches/65e746b6394f04faa027e778f733eda95d20f368.1753115072.git.aburgess@redhat.com
+  https://inbox.sourceware.org/gdb-patches/638cbe9b738c0c529f6370f90ba4a395711f63ae.1753971315.git.aburgess@redhat.com
+
+Neither of these really resolved the problem, they fixed some cases,
+but broke others.
+
+Ultimately, the problem on AArch64 is that for a single watchpoint
+trap, there could be multiple watchpoints that are potentially
+responsible.  The existing API defined by the target_ops methods
+stopped_by_watchpoint() and stopped_data_address() only allow for two
+possible options:
+
+  1. If stopped_by_watchpoint() is true then stopped_data_address()
+     can return true and a single address which identifies all
+     watchpoints at that single address, or
+
+  2. If stopped_by_watchpoint() is true then stopped_data_address()
+     can return false, in which case GDB will check all write
+     watchpoints to see if any have changed, if they have, then GDB
+     tells the user that that was the triggering watchpoint.
+
+If we are in a situation where we have to choose between multiple
+write and read watchpoints then the current API doesn't allow the
+architecture specific code to tell GDB core about this case.
+
+In this commit I propose that we change the target_ops API,
+specifically, the method:
+
+  bool target_ops::stopped_data_address (CORE_ADDR *);
+
+will change to:
+
+  std::vector<CORE_ADDR> target_ops::stopped_data_addresses ();
+
+The architecture specific code can now return a set of watchpoint
+addresses, allowing GDB to identify a set of watchpoints that might
+have triggered.  GDB core can then select the most likely watchpoint,
+and present that to the user.
+
+As with the old API, target_ops::stopped_data_addresses should only be
+called when target_ops::stopped_by_watchpoint is true, in which case
+it's return values can be interpreted like this:
+
+  a. An empty vector; this replaces the old case where false was
+     returned.  GDB should check all the write watchpoints and select
+     the one that changed as the responsible watchpoint.
+
+  b. A single entry vector; all targets except AArch64 currently
+     return at most a single entry vector.  The single address
+     indicates the watchpoint(s) that triggered.
+
+  c. A multi-entry vector; currently AArch64 only.  These addresses
+     indicate the set of watchpoints that might have triggered.  GDB
+     will check the write watchpoints to see which (if any) changed,
+     and if no write watchpoints changed, GDB will present the first
+     access watchpoint.
+
+In the future, we might want to improve the handling of (c) so that
+GDB tells the user that multiple access watchpoints might have
+triggered, and then list all of them.  This might clear up some
+confusion.  But I think that can be done in the future (I don't have
+an immediate plan to work on this).  I think this change is already a
+good improvement.
+
+The changes for this are pretty extensive, but here's a basic summary:
+
+  * Within gdb/ changing the API name from stopped_data_address to
+    stopped_data_addresses throughout.  Comments are updated too where
+    needed.
+
+  * For targets other than AArch64, the existing code is retained with
+    as few changes as possible, we only allow for a single address to
+    be returned, the address is now wrapped in a vector.  Where we
+    used to return false, we now return the empty vector.
+
+  * For AArch64, the return a vector logic is pushed through to
+    gdb/nat/aarch64-hw-point.{c,h}, and aarch64_stopped_data_address
+    changes to aarch64_stopped_data_addresses, and is updated to
+    return a vector of addresses.
+
+  * In infrun.c there's some updates to some debug output.
+
+  * In breakpoint.c the interesting changes are in
+    watchpoints_triggered.  The existing code has three cases to
+    handle:
+
+    (i) target_stopped_by_watchpoint returns false.  This case is
+        unchanged.
+
+    (ii) target_stopped_data_address returns false.  This case is now
+         calling target_stopped_data_addresses, and checks for the
+	 empty vector, but otherwise is unchanged.
+
+    (iii) target_stopped_data_address returns true, and a single
+          address.  This code calls target_stopped_data_addresses, and
+	  now handles the possibility of a vector containing multiple
+	  entries.  We need to first loop over every watchpoint
+	  setting its triggered status to 'no', then we check every
+	  address in the vector setting matching watchpoint's
+	  triggered status to 'yes'.  But the actual logic for if a
+	  watchpoint matches an address or not is unchanged.
+
+    The important thing to notice here is that in case (iii), before
+    this patch, GDB could already set _multiple_ watchpoints to
+    triggered.  For example, setting a read and write watchpoint on
+    the same address would result in multiple watchpoints being marked
+    as triggered.  This patch just extends this so that multiple
+    watchpoints, at multiple addresses, can now be marked as
+    triggered.
+
+  * In remote.c there is an interesting change.  We need to allow
+    gdbserver to pass the multiple addresses back to GDB.  To achieve
+    this, I now allow multiple 'watch', 'rwatch', and 'awatch' tokens
+    in a 'T' stop reply packet.  There's a new feature multi-wp-addr
+    which is passed in the qSupported packet to determine if the
+    remote is allowed to pass back multiple watchpoint stop reasons.
+
+    If the remote passed multiple watchpoint addresses then these are
+    collected and returned from the target_ops::stopped_data_addresses
+    call.
+
+    If a new GDB connects to an old gdbserver that doesn't understand
+    the multi-wp-addr feature, then gdbserver will continue to return
+    a single watchpoint address in the 'T' packet, which is what
+    happens before this patch.
+
+  * In gdbserver/ the changes are pretty similar.  The API is renamed
+    from ::stopped_data_address to ::stopped_data_addresses, and
+    ::low_stopped_data_address to ::low_stopped_data_addresses.
+
+    There's also code added to detect the new multi-wp-addr feature.
+    If this feature is not advertised from GDB then only a single
+    watchpoint address will be returned in the 'T' stop reply packet.
+
+  * In GDB and gdbserver, for all targets except AArch64, the existing
+    code to figure out a watchpoint address is retained, we just wrap
+    the single address into a vector.
+
+  * For AArch64, we call aarch64_stopped_data_addresses, which returns
+    the required vector.
+
+For testing, I've built GDB on GNU/Linux for i386, x86-64, PPC64le,
+ARM, and AArch64.  That still leaves a lot of targets possibly
+impacted by this change as untested.  Which is a risk.  I certainly
+wouldn't want to push this patch until after GDB 17 branches so we
+have time to find and fix any regressions that are introduced.
+
+I've run a full regression test on AArch64 and x86-64 (both GNU/Linux)
+with no regressions.  As I said above, for other targets nothing
+should really have changed, all non-AArch64 targets just return a
+single watchpoint address from target_ops::stopped_data_addresses(),
+so, as long as the target builds, it should run unchanged.
+
+I also sent the branch through the sourceware CI, and everything
+passed.
+
+Bug: https://sourceware.org/bugzilla/show_bug.cgi?id=33240
+Bug: https://sourceware.org/bugzilla/show_bug.cgi?id=33252
+
+Acked-By: Tom de Vries <tdevries@suse.de>
+
+diff --git a/gdb/NEWS b/gdb/NEWS
+--- a/gdb/NEWS
++++ b/gdb/NEWS
+@@ -98,6 +98,11 @@ info linker-namespaces [[N]]
+   Print information about the given linker namespace (identified as N),
+   or about all the namespaces if no argument is given.
+ 
++set remote multiple-watchpoint-addresses-packet
++show remote multiple-watchpoint-addresses-packet
++  Set/show the support for receiving multiple watchpoint addresses in
++  the 'T' stop reply packet.
++
+ * Changed commands
+ 
+ info sharedlibrary
+@@ -248,6 +253,20 @@ vFile:stat
+   lstat rather than stat.  This has now been corrected.  The
+   documentation has also been clarified.
+ 
++T
++  The signal stop packet can now include multiple 'watch', 'rwatch',
++  and 'awatch' stop reason entries.  GDB will select between all of
++  the possible watchpoint addresses that are returned when presenting
++  the stop to the user.
++
++multi-wp-addr in qSupported
++  The qSupported packet allows GDB to inform the stub it supports
++  receiving multiple watchpoint stop reasons in a single 'T' stop
++  reply packet.  This improves support for targets with ambiguous
++  hardware watchpoint address reporting (e.g. AArch64).  GDB will
++  always accept multiple watchpoint addresses regardless of whether
++  the stub claims to support this feature or not.
++
+ * MI changes
+ 
+ ** The =library-unloaded event now includes the 'ranges' field, which
+diff --git a/gdb/aarch64-fbsd-nat.c b/gdb/aarch64-fbsd-nat.c
+--- a/gdb/aarch64-fbsd-nat.c
++++ b/gdb/aarch64-fbsd-nat.c
+@@ -57,7 +57,7 @@ struct aarch64_fbsd_nat_target final : public fbsd_nat_target
+ #ifdef HAVE_DBREG
+   /* Hardware breakpoints and watchpoints.  */
+   bool stopped_by_watchpoint () override;
+-  bool stopped_data_address (CORE_ADDR *) override;
++  std::vector<CORE_ADDR> stopped_data_addresses () override;
+   bool stopped_by_hw_breakpoint () override;
+   bool supports_stopped_by_hw_breakpoint () override;
+ 
+@@ -134,28 +134,28 @@ bool aarch64_fbsd_nat_target::debug_regs_probed;
+ 
+ static std::unordered_set<lwpid_t> aarch64_debug_pending_threads;
+ 
+-/* Implement the "stopped_data_address" target_ops method.  */
++/* Implement the "stopped_data_addresses" target_ops method.  */
+ 
+-bool
+-aarch64_fbsd_nat_target::stopped_data_address (CORE_ADDR *addr_p)
++std::vector<CORE_ADDR>
++aarch64_fbsd_nat_target::stopped_data_addresses ()
+ {
+   siginfo_t siginfo;
+   struct aarch64_debug_reg_state *state;
+ 
+   if (!fbsd_nat_get_siginfo (inferior_ptid, &siginfo))
+-    return false;
++    return {};
+ 
+   /* This must be a hardware breakpoint.  */
+   if (siginfo.si_signo != SIGTRAP
+       || siginfo.si_code != TRAP_TRACE
+       || siginfo.si_trapno != EXCP_WATCHPT_EL0)
+-    return false;
++    return {};
+ 
+   const CORE_ADDR addr_trap = (CORE_ADDR) siginfo.si_addr;
+ 
+   /* Check if the address matches any watched address.  */
+   state = aarch64_get_debug_reg_state (inferior_ptid.pid ());
+-  return aarch64_stopped_data_address (state, addr_trap, addr_p);
++  return aarch64_stopped_data_addresses (state, addr_trap);
+ }
+ 
+ /* Implement the "stopped_by_watchpoint" target_ops method.  */
+@@ -163,7 +163,7 @@ aarch64_fbsd_nat_target::stopped_data_address (CORE_ADDR *addr_p)
+ bool
+ aarch64_fbsd_nat_target::stopped_by_watchpoint ()
+ {
+-  return stopped_data_address (nullptr);
++  return !stopped_data_addresses ().empty ();
+ }
+ 
+ /* Implement the "stopped_by_hw_breakpoint" target_ops method.  */
+diff --git a/gdb/aarch64-linux-nat.c b/gdb/aarch64-linux-nat.c
+--- a/gdb/aarch64-linux-nat.c
++++ b/gdb/aarch64-linux-nat.c
+@@ -75,7 +75,7 @@ class aarch64_linux_nat_target final
+ 
+   /* Add our hardware breakpoint and watchpoint implementation.  */
+   bool stopped_by_watchpoint () override;
+-  bool stopped_data_address (CORE_ADDR *) override;
++  std::vector<CORE_ADDR> stopped_data_addresses () override;
+ 
+   int can_do_single_step () override;
+ 
+@@ -1001,21 +1001,21 @@ aarch64_linux_nat_target::low_siginfo_fixup (siginfo_t *native, gdb_byte *inf,
+   return false;
+ }
+ 
+-/* Implement the "stopped_data_address" target_ops method.  */
++/* Implement the "stopped_data_addresses" target_ops method.  */
+ 
+-bool
+-aarch64_linux_nat_target::stopped_data_address (CORE_ADDR *addr_p)
++std::vector<CORE_ADDR>
++aarch64_linux_nat_target::stopped_data_addresses ()
+ {
+   siginfo_t siginfo;
+   struct aarch64_debug_reg_state *state;
+ 
+   if (!linux_nat_get_siginfo (inferior_ptid, &siginfo))
+-    return false;
++    return {};
+ 
+   /* This must be a hardware breakpoint.  */
+   if (siginfo.si_signo != SIGTRAP
+       || (siginfo.si_code & 0xffff) != TRAP_HWBKPT)
+-    return false;
++    return {};
+ 
+   /* Make sure to ignore the top byte, otherwise we may not recognize a
+      hardware watchpoint hit.  The stopped data addresses coming from the
+@@ -1026,7 +1026,7 @@ aarch64_linux_nat_target::stopped_data_address (CORE_ADDR *addr_p)
+ 
+   /* Check if the address matches any watched address.  */
+   state = aarch64_get_debug_reg_state (inferior_ptid.pid ());
+-  return aarch64_stopped_data_address (state, addr_trap, addr_p);
++  return aarch64_stopped_data_addresses (state, addr_trap);
+ }
+ 
+ /* Implement the "stopped_by_watchpoint" target_ops method.  */
+@@ -1034,7 +1034,7 @@ aarch64_linux_nat_target::stopped_data_address (CORE_ADDR *addr_p)
+ bool
+ aarch64_linux_nat_target::stopped_by_watchpoint ()
+ {
+-  return stopped_data_address (nullptr);
++  return !stopped_data_addresses ().empty ();
+ }
+ 
+ /* Implement the "can_do_single_step" target_ops method.  */
+diff --git a/gdb/arm-linux-nat.c b/gdb/arm-linux-nat.c
+--- a/gdb/arm-linux-nat.c
++++ b/gdb/arm-linux-nat.c
+@@ -88,7 +88,7 @@ class arm_linux_nat_target final : public linux_nat_target
+ 			 struct expression *) override;
+   bool stopped_by_watchpoint () override;
+ 
+-  bool stopped_data_address (CORE_ADDR *) override;
++  std::vector<CORE_ADDR> stopped_data_addresses () override;
+ 
+   const struct target_desc *read_description () override;
+ 
+@@ -1167,41 +1167,37 @@ arm_linux_nat_target::remove_watchpoint (CORE_ADDR addr,
+ }
+ 
+ /* What was the data address the target was stopped on accessing.  */
+-bool
+-arm_linux_nat_target::stopped_data_address (CORE_ADDR *addr_p)
++std::vector<CORE_ADDR>
++arm_linux_nat_target::stopped_data_addresses ()
+ {
+   siginfo_t siginfo;
+-  int slot;
+-
+   if (!linux_nat_get_siginfo (inferior_ptid, &siginfo))
+-    return false;
++    return {};
+ 
+   /* This must be a hardware breakpoint.  */
+   if (siginfo.si_signo != SIGTRAP
+       || (siginfo.si_code & 0xffff) != 0x0004 /* TRAP_HWBKPT */)
+-    return false;
++    return {};
+ 
+   /* We must be able to set hardware watchpoints.  */
+   if (arm_linux_get_hw_watchpoint_count () == 0)
+-    return 0;
++    return {};
+ 
+-  slot = siginfo.si_errno;
++  int slot = siginfo.si_errno;
+ 
+   /* If we are in a positive slot then we're looking at a breakpoint and not
+      a watchpoint.  */
+   if (slot >= 0)
+-    return false;
++    return {};
+ 
+-  *addr_p = (CORE_ADDR) (uintptr_t) siginfo.si_addr;
+-  return true;
++  return { (CORE_ADDR) (uintptr_t) siginfo.si_addr };
+ }
+ 
+ /* Has the target been stopped by hitting a watchpoint?  */
+ bool
+ arm_linux_nat_target::stopped_by_watchpoint ()
+ {
+-  CORE_ADDR addr;
+-  return stopped_data_address (&addr);
++  return !stopped_data_addresses ().empty ();
+ }
+ 
+ /* Handle thread creation.  We need to copy the breakpoints and watchpoints
+diff --git a/gdb/breakpoint.c b/gdb/breakpoint.c
+--- a/gdb/breakpoint.c
++++ b/gdb/breakpoint.c
+@@ -2140,7 +2140,7 @@ add_dummy_location (struct breakpoint *b,
+    The following constraints influence the location where we can reset
+    hardware watchpoints:
+ 
+-   * target_stopped_by_watchpoint and target_stopped_data_address are
++   * target_stopped_by_watchpoint and target_stopped_data_addresses are
+      called several times when GDB stops.
+ 
+    [linux] 
+@@ -5243,10 +5243,7 @@ bpstat::bpstat ()
+ int
+ watchpoints_triggered (const target_waitstatus &ws)
+ {
+-  bool stopped_by_watchpoint = target_stopped_by_watchpoint ();
+-  CORE_ADDR addr;
+-
+-  if (!stopped_by_watchpoint)
++  if (!target_stopped_by_watchpoint ())
+     {
+       /* We were not stopped by a watchpoint.  Mark all watchpoints
+ 	 as not triggered.  */
+@@ -5261,7 +5258,9 @@ watchpoints_triggered (const target_waitstatus &ws)
+       return 0;
+     }
+ 
+-  if (!target_stopped_data_address (current_inferior ()->top_target (), &addr))
++  std::vector<CORE_ADDR> addr_list
++    = target_stopped_data_addresses (current_inferior ()->top_target ());
++  if (addr_list.empty ())
+     {
+       /* We were stopped by a watchpoint, but we don't know where.
+ 	 Mark all watchpoints as unknown.  */
+@@ -5279,36 +5278,44 @@ watchpoints_triggered (const target_waitstatus &ws)
+   /* The target could report the data address.  Mark watchpoints
+      affected by this data address as triggered, and all others as not
+      triggered.  */
+-
+   for (breakpoint &b : all_breakpoints ())
+     if (is_hardware_watchpoint (&b))
+       {
+ 	watchpoint &w = gdb::checked_static_cast<watchpoint &> (b);
+-
+ 	w.watchpoint_triggered = watch_triggered_no;
+-	for (bp_location &loc : b.locations ())
++      }
++
++  for (const CORE_ADDR addr : addr_list)
++    {
++      for (breakpoint &b : all_breakpoints ())
++	if (is_hardware_watchpoint (&b))
+ 	  {
+-	    if (is_masked_watchpoint (&b))
++	    watchpoint &w = gdb::checked_static_cast<watchpoint &> (b);
++
++	    for (bp_location &loc : b.locations ())
+ 	      {
+-		CORE_ADDR newaddr = addr & w.hw_wp_mask;
+-		CORE_ADDR start = loc.address & w.hw_wp_mask;
++		if (is_masked_watchpoint (&b))
++		  {
++		    CORE_ADDR newaddr = addr & w.hw_wp_mask;
++		    CORE_ADDR start = loc.address & w.hw_wp_mask;
+ 
+-		if (newaddr == start)
++		    if (newaddr == start)
++		      {
++			w.watchpoint_triggered = watch_triggered_yes;
++			break;
++		      }
++		  }
++		/* Exact match not required.  Within range is sufficient.  */
++		else if (target_watchpoint_addr_within_range
++			 (current_inferior ()->top_target (), addr, loc.address,
++			  loc.length))
+ 		  {
+ 		    w.watchpoint_triggered = watch_triggered_yes;
+ 		    break;
+ 		  }
+ 	      }
+-	    /* Exact match not required.  Within range is sufficient.  */
+-	    else if (target_watchpoint_addr_within_range
+-		       (current_inferior ()->top_target (), addr, loc.address,
+-			loc.length))
+-	      {
+-		w.watchpoint_triggered = watch_triggered_yes;
+-		break;
+-	      }
+ 	  }
+-      }
++    }
+ 
+   return 1;
+ }
+@@ -5405,7 +5412,7 @@ watchpoint_check (bpstat *bs)
+ 
+       if (is_masked_watchpoint (b))
+ 	/* Since we don't know the exact trigger address (from
+-	   stopped_data_address), just tell the user we've triggered
++	   stopped_data_addresses), just tell the user we've triggered
+ 	   a mask watchpoint.  */
+ 	return WP_VALUE_CHANGED;
+ 
+diff --git a/gdb/doc/gdb.texinfo b/gdb/doc/gdb.texinfo
+--- a/gdb/doc/gdb.texinfo
++++ b/gdb/doc/gdb.texinfo
+@@ -24892,6 +24892,10 @@ future connections is shown.  The available settings are:
+ @tab @code{no resumed thread left stop reply}
+ @tab Tracking thread lifetime.
+ 
++@item @code{multiple-watchpoint-addresses}
++@tab @code{multiple watchpoint stop reasons}
++@tab Allow multiple, ambiguous, watchpoint addresses in @samp{T} stop reply.
++
+ @end multitable
+ 
+ @cindex packet size, remote, configuring
+@@ -43982,8 +43986,24 @@ The currently defined stop reasons are:
+ @item watch
+ @itemx rwatch
+ @itemx awatch
+-The packet indicates a watchpoint hit, and @var{r} is the data address, in
+-hex.
++The packet indicates a watchpoint hit, and @var{r} is the data
++address, in hex.
++
++Some targets, for example AArch64, are unable to accurately report the
++address which triggered a watchpoint trap.  As a consequence, multiple
++watched addresses could explain a single watchpoint trap.
++
++If @value{GDBN} sent the @samp{multi-wp-addr} feature flag in its
++@samp{qSupported} packet (@pxref{multi-wp-addr feature}), then
++multiple instances of these stop reasons can appear in a single
++@samp{T} stop reply packet.  @value{GDBN} will select between the
++multiple reported watchpoint addresses when displaying the stop to the
++user.
++
++If the @samp{multi-wp-addr} was not sent by @value{GDBN}, then
++@value{GDBN} only expects one watchpoint related stop address in a
++single @samp{T} packet.  The server must select the most likely
++watchpoint address.
+ 
+ @item syscall_entry
+ @itemx syscall_return
+@@ -45095,6 +45115,25 @@ didn't support @samp{E.@var{errtext}}, and older versions of
+ 
+ New packets should be written to support @samp{E.@var{errtext}}
+ regardless of this feature being true or not.
++
++@anchor{single-inf-arg}
++@item single-inf-arg
++This feature indicates that @value{GDBN} would like to send the
++inferior arguments as a single string within the @samp{vRun} packet.
++@value{GDBN} will not send the arguments as a single string unless the
++stub also reports that it supports this behaviour by including
++@samp{single-inf-arg+} in its @samp{qSupported} reply.
++
++@anchor{multi-wp-addr feature}
++@item multi-wp-addr
++This features indicates that @value{GDBN} supports receiving multiple
++watchpoint addresses in the @samp{T} stop reply packet (@pxref{Stop
++Reply Packets}).
++
++Use of this feature is controlled by the @code{set remote
++multiple-watchpoint-addresses-packet} command (@pxref{Remote
++Configuration, set remote multiple-watchpoint-addresses-packet}).
++
+ @end table
+ 
+ Stubs should ignore any unknown values for
+@@ -45398,6 +45437,16 @@ These are the currently defined stub features and their properties:
+ @tab @samp{-}
+ @tab No
+ 
++@item @samp{single-inf-arg}
++@tab No
++@tab @samp{-}
++@tab No
++
++@item @samp{multi-wp-addr}
++@tab No
++@tab @samp{+}
++@tab No
++
+ @end multitable
+ 
+ These are the currently defined stub features, in more detail:
+@@ -45647,6 +45696,21 @@ if it sent the @samp{error-message} feature.
+ 
+ @item binary-upload
+ The remote stub supports the @samp{x} packet (@pxref{x packet}).
++
++@item single-inf-arg
++The remote stub would like to receive the inferior arguments as a
++single string within the @samp{vRun} packet.  The stub should only
++send this feature if @value{GDBN} sent @samp{single-inf-arg+} in the
++@samp{qSupported} packet.
++
++@item multi-wp-addr
++The remote stub supports sending multiple watchpoint addresses within
++@samp{T} stop reply packet.  Stubs that don't support this feature
++don't need to tell @value{GDBN}.  Not supporting this feature just
++means sending back one watchpoint address instead of multiple, and
++@value{GDBN} has always supported receiving a single watchpoint
++address.
++
+ @end table
+ 
+ @item qSymbol::
+diff --git a/gdb/ia64-linux-nat.c b/gdb/ia64-linux-nat.c
+--- a/gdb/ia64-linux-nat.c
++++ b/gdb/ia64-linux-nat.c
+@@ -72,7 +72,7 @@ class ia64_linux_nat_target final : public linux_nat_target
+ 
+   int can_use_hw_breakpoint (enum bptype, int, int) override;
+   bool stopped_by_watchpoint () override;
+-  bool stopped_data_address (CORE_ADDR *) override;
++  std::vector<CORE_ADDR> stopped_data_addresses () override;
+   int insert_watchpoint (CORE_ADDR, int, enum target_hw_bp_type,
+ 			 struct expression *) override;
+   int remove_watchpoint (CORE_ADDR, int, enum target_hw_bp_type,
+@@ -686,34 +686,32 @@ ia64_linux_nat_target::low_new_thread (struct lwp_info *lp)
+     enable_watchpoints_in_psr (lp->ptid);
+ }
+ 
+-bool
+-ia64_linux_nat_target::stopped_data_address (CORE_ADDR *addr_p)
++std::vector<CORE_ADDR>
++ia64_linux_nat_target::stopped_data_addresses ()
+ {
+   CORE_ADDR psr;
+   siginfo_t siginfo;
+   regcache *regcache = get_thread_regcache (inferior_thread ());
+ 
+   if (!linux_nat_get_siginfo (inferior_ptid, &siginfo))
+-    return false;
++    return {};
+ 
+   if (siginfo.si_signo != SIGTRAP
+       || (siginfo.si_code & 0xffff) != 0x0004 /* TRAP_HWBKPT */)
+-    return false;
++    return {};
+ 
+   regcache_cooked_read_unsigned (regcache, IA64_PSR_REGNUM, &psr);
+   psr |= IA64_PSR_DD;	/* Set the dd bit - this will disable the watchpoint
+ 			   for the next instruction.  */
+   regcache_cooked_write_unsigned (regcache, IA64_PSR_REGNUM, psr);
+ 
+-  *addr_p = (CORE_ADDR) siginfo.si_addr;
+-  return true;
++  return { (CORE_ADDR) siginfo.si_addr };
+ }
+ 
+ bool
+ ia64_linux_nat_target::stopped_by_watchpoint ()
+ {
+-  CORE_ADDR addr;
+-  return stopped_data_address (&addr);
++  return !stopped_data_addresses ().empty ();
+ }
+ 
+ int
+diff --git a/gdb/infrun.c b/gdb/infrun.c
+--- a/gdb/infrun.c
++++ b/gdb/infrun.c
+@@ -6890,16 +6890,26 @@ handle_signal_stop (struct execution_control_state *ecs)
+ 	("stop_pc=%s", paddress (reg_gdbarch, ecs->event_thread->stop_pc ()));
+       if (target_stopped_by_watchpoint ())
+ 	{
+-	  CORE_ADDR addr;
++	  auto inf_target = current_inferior ()->top_target ();
++	  std::vector<CORE_ADDR> addr_list
++	    = target_stopped_data_addresses (inf_target);
+ 
+-	  infrun_debug_printf ("stopped by watchpoint");
+-
+-	  if (target_stopped_data_address (current_inferior ()->top_target (),
+-					   &addr))
+-	    infrun_debug_printf ("stopped data address=%s",
+-				 paddress (reg_gdbarch, addr));
++	  std::string addr_str;
++	  if (addr_list.empty ())
++	    addr_str = "(no data addressses available)";
+ 	  else
+-	    infrun_debug_printf ("(no data address available)");
++	    {
++	      for (const CORE_ADDR addr : addr_list)
++		{
++		  if (addr_str.length () > 0)
++		    addr_str += ", ";
++
++		  addr_str += paddress (reg_gdbarch, addr);
++		}
++	    }
++
++	  infrun_debug_printf ("stopped by watchpoint, data addresses = %s",
++			       addr_str.c_str ());
+ 	}
+     }
+ 
+diff --git a/gdb/linux-nat.c b/gdb/linux-nat.c
+--- a/gdb/linux-nat.c
++++ b/gdb/linux-nat.c
+@@ -2515,16 +2515,17 @@ linux_nat_target::stopped_by_watchpoint ()
+   return lp->stop_reason == TARGET_STOPPED_BY_WATCHPOINT;
+ }
+ 
+-bool
+-linux_nat_target::stopped_data_address (CORE_ADDR *addr_p)
++std::vector<CORE_ADDR>
++linux_nat_target::stopped_data_addresses ()
+ {
+   struct lwp_info *lp = find_lwp_pid (inferior_ptid);
+ 
+   gdb_assert (lp != NULL);
+ 
+-  *addr_p = lp->stopped_data_address;
++  if (lp->stopped_data_address_p)
++    return { lp->stopped_data_address };
+ 
+-  return lp->stopped_data_address_p;
++  return {};
+ }
+ 
+ /* Commonly any breakpoint / watchpoint generate only SIGTRAP.  */
+diff --git a/gdb/linux-nat.h b/gdb/linux-nat.h
+--- a/gdb/linux-nat.h
++++ b/gdb/linux-nat.h
+@@ -70,7 +70,7 @@ class linux_nat_target : public inf_ptrace_target
+ 
+   bool stopped_by_watchpoint () override;
+ 
+-  bool stopped_data_address (CORE_ADDR *) override;
++  std::vector<CORE_ADDR> stopped_data_addresses () override;
+ 
+   bool stopped_by_sw_breakpoint () override;
+   bool supports_stopped_by_sw_breakpoint () override;
+diff --git a/gdb/loongarch-linux-nat.c b/gdb/loongarch-linux-nat.c
+--- a/gdb/loongarch-linux-nat.c
++++ b/gdb/loongarch-linux-nat.c
+@@ -75,7 +75,7 @@ class loongarch_linux_nat_target final : public linux_nat_trad_target
+ 
+   /* Add our hardware breakpoint and watchpoint implementation.  */
+   bool stopped_by_watchpoint () override;
+-  bool stopped_data_address (CORE_ADDR *) override;
++  std::vector<CORE_ADDR> stopped_data_addresses () override;
+ 
+   int insert_hw_breakpoint (struct gdbarch *gdbarch,
+ 			    struct bp_target_info *bp_tgt) override;
+@@ -579,26 +579,30 @@ loongarch_linux_nat_target::remove_watchpoint (CORE_ADDR addr, int len,
+ 
+ }
+ 
+-/* Implement the "stopped_data_address" target_ops method.  */
++/* Implement the "stopped_data_addresses" target_ops method.  */
+ 
+-bool
+-loongarch_linux_nat_target::stopped_data_address (CORE_ADDR *addr_p)
++std::vector<CORE_ADDR>
++loongarch_linux_nat_target::stopped_data_addresses ()
+ {
+   siginfo_t siginfo;
+   struct loongarch_debug_reg_state *state;
+ 
+   if (!linux_nat_get_siginfo (inferior_ptid, &siginfo))
+-    return false;
++    return {};
+ 
+   /* This must be a hardware breakpoint.  */
+   if (siginfo.si_signo != SIGTRAP || (siginfo.si_code & 0xffff) != TRAP_HWBKPT)
+-    return false;
++    return {};
+ 
+   /* Check if the address matches any watched address.  */
+   state = loongarch_get_debug_reg_state (inferior_ptid.pid ());
+ 
+-  return
+-    loongarch_stopped_data_address (state, (CORE_ADDR) siginfo.si_addr, addr_p);
++  CORE_ADDR addr;
++  if (loongarch_stopped_data_address (state, (CORE_ADDR) siginfo.si_addr,
++				      &addr))
++    return { addr };
++
++  return {};
+ }
+ 
+ /* Implement the "stopped_by_watchpoint" target_ops method.  */
+@@ -606,9 +610,7 @@ loongarch_linux_nat_target::stopped_data_address (CORE_ADDR *addr_p)
+ bool
+ loongarch_linux_nat_target::stopped_by_watchpoint ()
+ {
+-  CORE_ADDR addr;
+-
+-  return stopped_data_address (&addr);
++  return !stopped_data_addresses ().empty ();
+ }
+ 
+ /* Insert a hardware-assisted breakpoint at BP_TGT->reqstd_address.
+diff --git a/gdb/mips-linux-nat.c b/gdb/mips-linux-nat.c
+--- a/gdb/mips-linux-nat.c
++++ b/gdb/mips-linux-nat.c
+@@ -60,7 +60,7 @@ class mips_linux_nat_target final : public linux_nat_trad_target
+ 
+   bool stopped_by_watchpoint () override;
+ 
+-  bool stopped_data_address (CORE_ADDR *) override;
++  std::vector<CORE_ADDR> stopped_data_addresses () override;
+ 
+   int region_ok_for_hw_watchpoint (CORE_ADDR, int) override;
+ 
+@@ -598,16 +598,17 @@ mips_linux_nat_target::stopped_by_watchpoint ()
+   return false;
+ }
+ 
+-/* Target to_stopped_data_address implementation.  Set the address
+-   where the watch triggered (if known).  Return 1 if the address was
+-   known.  */
++/* Target stopped_data_addresses implementation.  Return a vector
++   containing the address(es) of the watchpoint(s) that triggered, if
++   known.  Return an empty vector if it is unknown which watchpoint(s)
++   triggered.  */
+ 
+-bool
+-mips_linux_nat_target::stopped_data_address (CORE_ADDR *paddr)
++std::vector<CORE_ADDR>
++mips_linux_nat_target::stopped_data_addresses ()
+ {
+   /* On mips we don't know the low order 3 bits of the data address,
+-     so we must return false.  */
+-  return false;
++     so we must return an empty vector.  */
++  return {};
+ }
+ 
+ /* Target to_region_ok_for_hw_watchpoint implementation.  Return 1 if
+diff --git a/gdb/nat/aarch64-hw-point.c b/gdb/nat/aarch64-hw-point.c
+--- a/gdb/nat/aarch64-hw-point.c
++++ b/gdb/nat/aarch64-hw-point.c
+@@ -215,14 +215,14 @@ aarch64_point_is_aligned (ptid_t ptid, int is_watchpoint, CORE_ADDR addr,
+ 
+    Another limitation is that because the watched region is enlarged,
+    the watchpoint fault address discovered by
+-   aarch64_stopped_data_address may be outside of the original watched
++   aarch64_stopped_data_addresses may be outside of the original watched
+    region, especially when the triggering instruction is accessing a
+    larger region.  When the fault address is not within any known
+    range, watchpoints_triggered in gdb will get confused, as the
+    higher-level watchpoint management is only aware of original
+    watched regions, and will think that some unknown watchpoint has
+    been triggered.  To prevent such a case,
+-   aarch64_stopped_data_address implementations in gdb and gdbserver
++   aarch64_stopped_data_addresses implementations in gdb and gdbserver
+    try to match the trapped address with a watched region, and return
+    an address within the latter. */
+ 
+@@ -648,63 +648,52 @@ aarch64_region_ok_for_watchpoint (CORE_ADDR addr, int len)
+ 
+ /* See nat/aarch64-hw-point.h.  */
+ 
+-bool
+-aarch64_stopped_data_address (const struct aarch64_debug_reg_state *state,
+-			      CORE_ADDR addr_trap, CORE_ADDR *addr_p)
++std::vector<CORE_ADDR>
++aarch64_stopped_data_addresses (const struct aarch64_debug_reg_state *state,
++				CORE_ADDR addr_trap)
+ {
+-  bool found = false;
+-  for (int phase = 0; phase <= 1; ++phase)
+-    for (int i = aarch64_num_wp_regs - 1; i >= 0; --i)
+-      {
+-	if (!(state->dr_ref_count_wp[i]
+-	      && DR_CONTROL_ENABLED (state->dr_ctrl_wp[i])))
+-	  {
+-	    /* Watchpoint disabled.  */
+-	    continue;
+-	  }
+-
+-	const enum target_hw_bp_type type
+-	  = aarch64_watchpoint_type (state->dr_ctrl_wp[i]);
+-	if (type == hw_execute)
+-	  {
+-	    /* Watchpoint disabled.  */
+-	    continue;
+-	  }
+-
+-	if (phase == 0)
+-	  {
+-	    /* Phase 0: No hw_write.  */
+-	    if (type == hw_write)
+-	      continue;
+-	  }
+-	else
+-	  {
+-	    /* Phase 1: Only hw_write.  */
+-	    if (type != hw_write)
+-	      continue;
+-	  }
+-
+-	const unsigned int offset
+-	  = aarch64_watchpoint_offset (state->dr_ctrl_wp[i]);
+-	const unsigned int len
+-	  = aarch64_watchpoint_length (state->dr_ctrl_wp[i]);
+-	const CORE_ADDR addr_watch = state->dr_addr_wp[i] + offset;
+-	const CORE_ADDR addr_watch_aligned
+-	  = align_down (state->dr_addr_wp[i], AARCH64_HWP_MAX_LEN_PER_REG);
+-	const CORE_ADDR addr_orig = state->dr_addr_orig_wp[i];
+-
+-	/* ADDR_TRAP reports the first address of the memory range
+-	   accessed by the CPU, regardless of what was the memory
+-	   range watched.  Thus, a large CPU access that straddles
+-	   the ADDR_WATCH..ADDR_WATCH+LEN range may result in an
+-	   ADDR_TRAP that is lower than the
+-	   ADDR_WATCH..ADDR_WATCH+LEN range.  E.g.:
++  /* List of all watchpoint addresses that could account for a watchpoint
++     trap triggered at ADDR_TRAP.  */
++  std::vector<CORE_ADDR> matching_addresses;
++
++  for (int i = aarch64_num_wp_regs - 1; i >= 0; --i)
++    {
++      if (!(state->dr_ref_count_wp[i]
++	    && DR_CONTROL_ENABLED (state->dr_ctrl_wp[i])))
++	{
++	  /* Watchpoint disabled.  */
++	  continue;
++	}
++
++      const enum target_hw_bp_type type
++	= aarch64_watchpoint_type (state->dr_ctrl_wp[i]);
++      if (type == hw_execute)
++	{
++	  /* Watchpoint disabled.  */
++	  continue;
++	}
++
++      const unsigned int offset
++	= aarch64_watchpoint_offset (state->dr_ctrl_wp[i]);
++      const unsigned int len
++	= aarch64_watchpoint_length (state->dr_ctrl_wp[i]);
++      const CORE_ADDR addr_watch = state->dr_addr_wp[i] + offset;
++      const CORE_ADDR addr_watch_aligned
++	= align_down (state->dr_addr_wp[i], AARCH64_HWP_MAX_LEN_PER_REG);
++      const CORE_ADDR addr_orig = state->dr_addr_orig_wp[i];
++
++      /* ADDR_TRAP reports the first address of the memory range
++	 accessed by the CPU, regardless of what was the memory
++	 range watched.  Thus, a large CPU access that straddles
++	 the ADDR_WATCH..ADDR_WATCH+LEN range may result in an
++	 ADDR_TRAP that is lower than the
++	 ADDR_WATCH..ADDR_WATCH+LEN range.  E.g.:
+ 
+ 	   addr: |   4	 |   5	 |   6	 |   7	 |   8	 |
+ 				 |---- range watched ----|
+ 		 |----------- range accessed ------------|
+ 
+-	   In this case, ADDR_TRAP will be 4.
++	 In this case, ADDR_TRAP will be 4.
+ 
+ 	   The access size also can be larger than that of the watchpoint
+ 	   itself.  For instance, the access size of an stp instruction is 16.
+@@ -714,47 +703,16 @@ aarch64_stopped_data_address (const struct aarch64_debug_reg_state *state,
+ 	const CORE_ADDR max_access_size = 16;
+ 	const CORE_ADDR addr_watch_base = addr_watch_aligned -
+ 	  (max_access_size - AARCH64_HWP_MAX_LEN_PER_REG);
+-	if (!(addr_trap >= addr_watch_base
+-	      && addr_trap < addr_watch + len))
+-	  {
+-	    /* Not a match.  */
+-	    continue;
+-	  }
+-
+-	/* To match a watchpoint known to GDB core, we must never
+-	   report *ADDR_P outside of any ADDR_WATCH..ADDR_WATCH+LEN
+-	   range.  ADDR_WATCH <= ADDR_TRAP < ADDR_ORIG is a false
+-	   positive on kernels older than 4.10.  See PR
+-	   external/20207.  */
+-	if (addr_p != nullptr)
+-	  *addr_p = addr_orig;
+-
+-	if (phase == 0)
+-	  {
+-	    /* Phase 0: Return first match.  */
+-	    return true;
+-	  }
+-
+-	/* Phase 1.  */
+-	if (addr_p == nullptr)
+-	  {
+-	    /* First match, and we don't need to report an address.  No need
+-	       to look for other matches.  */
+-	    return true;
+-	  }
+-
+-	if (!found)
+-	  {
+-	    /* First match, and we need to report an address.  Look for other
+-	       matches.  */
+-	    found = true;
+-	    continue;
+-	  }
+-
+-	/* More than one match, and we need to return an address.  No need to
+-	   look for further matches.  */
+-	return false;
++
++      if (!(addr_trap >= addr_watch_base
++	    && addr_trap < addr_watch + len))
++      {
++	/* Not a match.  */
++	continue;
+       }
+ 
+-  return found;
++      matching_addresses.push_back (addr_orig);
++    }
++
++  return matching_addresses;
+ }
+diff --git a/gdb/nat/aarch64-hw-point.h b/gdb/nat/aarch64-hw-point.h
+--- a/gdb/nat/aarch64-hw-point.h
++++ b/gdb/nat/aarch64-hw-point.h
+@@ -110,13 +110,18 @@ unsigned int aarch64_watchpoint_offset (unsigned int ctrl);
+ unsigned int aarch64_watchpoint_length (unsigned int ctrl);
+ enum target_hw_bp_type aarch64_watchpoint_type (unsigned int ctrl);
+ 
+-/* Helper for the "stopped_data_address" target method.  Returns TRUE
+-   if a hardware watchpoint trap at ADDR_TRAP matches a set
+-   watchpoint.  The address of the matched watchpoint is returned in
+-   *ADDR_P.  */
+-
+-bool aarch64_stopped_data_address (const struct aarch64_debug_reg_state *state,
+-				   CORE_ADDR addr_trap, CORE_ADDR *addr_p);
++/* Helper for the "stopped_data_addresses" target method.  Returns a vector
++   containing the addresses of all hardware watchpoints that could account
++   for a watchpoint trap at ADDR_TRAP.  Return an empty vector if no
++   suitable watchpoint addresses can be identified.
++
++   It is possible that multiple watchpoints could account for a trap at
++   ADDR_TRAP, in which case all possible addresses are returned, and GDB
++   core is responsible for selecting a suitable watchpoint, or otherwise
++   letting the user know that there is some ambiguity.  */
++
++extern std::vector<CORE_ADDR> aarch64_stopped_data_addresses
++  (const struct aarch64_debug_reg_state *state, CORE_ADDR addr_trap);
+ 
+ int aarch64_handle_breakpoint (enum target_hw_bp_type type, CORE_ADDR addr,
+ 			       int len, int is_insert, ptid_t ptid,
+diff --git a/gdb/nat/x86-dregs.c b/gdb/nat/x86-dregs.c
+--- a/gdb/nat/x86-dregs.c
++++ b/gdb/nat/x86-dregs.c
+@@ -655,7 +655,7 @@ x86_dr_stopped_data_address (struct x86_debug_reg_state *state,
+ 
+       /* This second condition makes sure DRi is set up for a data
+ 	 watchpoint, not a hardware breakpoint.  The reason is that
+-	 GDB doesn't call the target_stopped_data_address method
++	 GDB doesn't call the target_stopped_data_addresses method
+ 	 except for data watchpoints.  In other words, I'm being
+ 	 paranoiac.  */
+       if (X86_DR_GET_RW_LEN (control, i) != 0)
+diff --git a/gdb/procfs.c b/gdb/procfs.c
+--- a/gdb/procfs.c
++++ b/gdb/procfs.c
+@@ -159,7 +159,7 @@ class procfs_target final : public inf_child_target
+   int region_ok_for_hw_watchpoint (CORE_ADDR, int) override;
+ 
+   int can_use_hw_breakpoint (enum bptype, int, int) override;
+-  bool stopped_data_address (CORE_ADDR *) override;
++  std::vector<CORE_ADDR> stopped_data_addresses () override;
+ 
+   void procfs_init_inferior (int pid);
+ };
+@@ -3045,19 +3045,19 @@ procfs_target::stopped_by_watchpoint ()
+   return false;
+ }
+ 
+-/* Returns 1 if the OS knows the position of the triggered watchpoint,
+-   and sets *ADDR to that address.  Returns 0 if OS cannot report that
+-   address.  This function is only called if
+-   procfs_stopped_by_watchpoint returned 1, thus no further checks are
+-   done.  The function also assumes that ADDR is not NULL.  */
++/* Returns a vector containing the position of the triggered watchpoint.
++   Returns the empty vector if OS cannot report that address.  This
++   function is only called if procfs_stopped_by_watchpoint returned 1, thus
++   no further checks are done.  */
+ 
+-bool
+-procfs_target::stopped_data_address (CORE_ADDR *addr)
++std::vector<CORE_ADDR>
++procfs_target::stopped_data_addresses ()
+ {
+-  procinfo *pi;
+-
+-  pi = find_procinfo_or_die (inferior_ptid.pid (), 0);
+-  return proc_watchpoint_address (pi, addr);
++  procinfo *pi = find_procinfo_or_die (inferior_ptid.pid (), 0);
++  CORE_ADDR addr;
++  if (proc_watchpoint_address (pi, &addr))
++    return { addr };
++  return {};
+ }
+ 
+ int
+diff --git a/gdb/ravenscar-thread.c b/gdb/ravenscar-thread.c
+--- a/gdb/ravenscar-thread.c
++++ b/gdb/ravenscar-thread.c
+@@ -101,7 +101,7 @@ struct ravenscar_thread_target final : public target_ops
+ 
+   bool stopped_by_watchpoint () override;
+ 
+-  bool stopped_data_address (CORE_ADDR *) override;
++  std::vector<CORE_ADDR> stopped_data_addresses () override;
+ 
+   enum target_xfer_status xfer_partial (enum target_object object,
+ 					const char *annex,
+@@ -818,14 +818,14 @@ ravenscar_thread_target::stopped_by_watchpoint ()
+   return beneath ()->stopped_by_watchpoint ();
+ }
+ 
+-/* Implement the to_stopped_data_address target_ops "method".  */
++/* Implement the to_stopped_data_addresses target_ops "method".  */
+ 
+-bool
+-ravenscar_thread_target::stopped_data_address (CORE_ADDR *addr_p)
++std::vector<CORE_ADDR>
++ravenscar_thread_target::stopped_data_addresses ()
+ {
+   scoped_restore_current_thread saver;
+   set_base_thread_from_ravenscar_task (inferior_ptid);
+-  return beneath ()->stopped_data_address (addr_p);
++  return beneath ()->stopped_data_addresses ();
+ }
+ 
+ void
+diff --git a/gdb/record-full.c b/gdb/record-full.c
+--- a/gdb/record-full.c
++++ b/gdb/record-full.c
+@@ -232,7 +232,7 @@ class record_full_base_target : public target_ops
+   void async (bool) override;
+   ptid_t wait (ptid_t, struct target_waitstatus *, target_wait_flags) override;
+   bool stopped_by_watchpoint () override;
+-  bool stopped_data_address (CORE_ADDR *) override;
++  std::vector<CORE_ADDR> stopped_data_addresses () override;
+ 
+   bool stopped_by_sw_breakpoint () override;
+   bool supports_stopped_by_sw_breakpoint () override;
+@@ -1501,13 +1501,13 @@ record_full_base_target::stopped_by_watchpoint ()
+     return beneath ()->stopped_by_watchpoint ();
+ }
+ 
+-bool
+-record_full_base_target::stopped_data_address (CORE_ADDR *addr_p)
++std::vector<CORE_ADDR>
++record_full_base_target::stopped_data_addresses ()
+ {
+   if (RECORD_FULL_IS_REPLAY)
+-    return false;
++    return {};
+   else
+-    return this->beneath ()->stopped_data_address (addr_p);
++    return this->beneath ()->stopped_data_addresses ();
+ }
+ 
+ /* The stopped_by_sw_breakpoint method of target record-full.  */
+diff --git a/gdb/remote.c b/gdb/remote.c
+--- a/gdb/remote.c
++++ b/gdb/remote.c
+@@ -402,6 +402,21 @@ enum {
+      errors, and so they should not need to check for this feature.  */
+   PACKET_accept_error_message,
+ 
++  /* Not really a packet; this indicates support for sending the vRun
++     inferior arguments as a single string.  */
++  PACKET_vRun_single_argument,
++
++  /* Support the qExecAndArgs packet.  */
++  PACKET_qExecAndArgs,
++
++  /* Support for receiving multiple watchpoint addresses in a stop reply
++     packet.  This is useful for targets that have imprecise hardware
++     watchpoint address reporting (e.g. AArch64),and gdbserver might not be
++     able to figure out which watchpoint triggered.  All possible
++     watchpoint addresses will then be passed back to GDB, and GDB can pick
++     the most likely watchpoint to show to the user.  */
++  PACKET_multi_wp_addr,
++
+   PACKET_MAX
+ };
+ 
+@@ -894,7 +909,7 @@ class remote_target : public process_stratum_target
+ 
+   bool stopped_by_watchpoint () override;
+ 
+-  bool stopped_data_address (CORE_ADDR *) override;
++  std::vector<CORE_ADDR> stopped_data_addresses () override;
+ 
+   bool watchpoint_addr_within_range (CORE_ADDR, CORE_ADDR, int) override;
+ 
+@@ -1480,7 +1495,7 @@ struct stop_reply : public notif_event
+ 
+   enum target_stop_reason stop_reason;
+ 
+-  CORE_ADDR watch_data_address;
++  std::vector<CORE_ADDR> watch_data_addresses;
+ 
+   int core;
+ };
+@@ -1638,9 +1653,12 @@ struct remote_thread_info : public private_thread_info
+   /* Whether the target stopped for a breakpoint/watchpoint.  */
+   enum target_stop_reason stop_reason = TARGET_STOPPED_BY_NO_REASON;
+ 
+-  /* This is set to the data address of the access causing the target
+-     to stop for a watchpoint.  */
+-  CORE_ADDR watch_data_address = 0;
++  /* This is set to all the watchpoint addresses of the access causing the
++     target to stop for a watchpoint.  Some targets (e.g. AArch64) have
++     imprecise watchpoint address reporting, so multiple watchpoints could
++     account for a stop.  All possible watchpoint addresses are reported
++     back to GDB, and GDB must select between them.  */
++  std::vector<CORE_ADDR> watch_data_addresses;
+ 
+   /* Get the thread's resume state.  */
+   enum resume_state get_resume_state () const
+@@ -5877,6 +5895,10 @@ static const struct protocol_feature remote_protocol_features[] = {
+   { "error-message", PACKET_ENABLE, remote_supported_packet,
+     PACKET_accept_error_message },
+   { "binary-upload", PACKET_DISABLE, remote_supported_packet, PACKET_x },
++  { "single-inf-arg", PACKET_DISABLE, remote_supported_packet,
++    PACKET_vRun_single_argument },
++  { "multi-watchpoint-addr", PACKET_ENABLE, remote_supported_packet,
++    PACKET_multi_wp_addr },
+ };
+ 
+ static char *remote_support_xml;
+@@ -5999,6 +6021,10 @@ remote_target::remote_query_supported ()
+ 	  != AUTO_BOOLEAN_FALSE)
+ 	remote_query_supported_append (&q, "error-message+");
+ 
++      if (m_features.packet_set_cmd_state (PACKET_multi_wp_addr)
++	  != AUTO_BOOLEAN_FALSE)
++	remote_query_supported_append (&q, "multi-wp-addr+");
++
+       q = "qSupported:" + q;
+       putpkt (q.c_str ());
+ 
+@@ -6895,7 +6921,7 @@ resume_clear_thread_private_info (struct thread_info *thread)
+       remote_thread_info *priv = get_remote_thread_info (thread);
+ 
+       priv->stop_reason = TARGET_STOPPED_BY_NO_REASON;
+-      priv->watch_data_address = 0;
++      priv->watch_data_addresses.clear ();
+     }
+ }
+ 
+@@ -7511,7 +7537,7 @@ remote_target::remote_stop_ns (ptid_t ptid)
+ 	    sr->ws.set_stopped (GDB_SIGNAL_0);
+ 	    sr->arch = tp->inf->arch ();
+ 	    sr->stop_reason = TARGET_STOPPED_BY_NO_REASON;
+-	    sr->watch_data_address = 0;
++	    sr->watch_data_addresses.clear ();
+ 	    sr->core = 0;
+ 	    this->push_stop_reply (std::move (sr));
+ 
+@@ -8097,7 +8123,7 @@ Packet: '%s'\n"),
+ 	    {
+ 	      event->stop_reason = TARGET_STOPPED_BY_WATCHPOINT;
+ 	      p = unpack_varlen_hex (++p1, &addr);
+-	      event->watch_data_address = (CORE_ADDR) addr;
++	      event->watch_data_addresses.push_back ((CORE_ADDR) addr);
+ 	    }
+ 	  else if (strprefix (p, p1, "swbreak"))
+ 	    {
+@@ -8610,7 +8636,7 @@ remote_target::process_stop_reply (stop_reply_up stop_reply,
+       remote_thread_info *remote_thr = get_remote_thread_info (this, ptid);
+       remote_thr->core = stop_reply->core;
+       remote_thr->stop_reason = stop_reply->stop_reason;
+-      remote_thr->watch_data_address = stop_reply->watch_data_address;
++      remote_thr->watch_data_addresses = stop_reply->watch_data_addresses;
+ 
+       if (target_is_non_stop_p ())
+ 	{
+@@ -11415,20 +11441,16 @@ remote_target::stopped_by_watchpoint ()
+ 	      == TARGET_STOPPED_BY_WATCHPOINT));
+ }
+ 
+-bool
+-remote_target::stopped_data_address (CORE_ADDR *addr_p)
++std::vector<CORE_ADDR>
++remote_target::stopped_data_addresses ()
+ {
+   struct thread_info *thread = inferior_thread ();
+ 
+   if (thread->priv != NULL
+-      && (get_remote_thread_info (thread)->stop_reason
+-	  == TARGET_STOPPED_BY_WATCHPOINT))
+-    {
+-      *addr_p = get_remote_thread_info (thread)->watch_data_address;
+-      return true;
+-    }
++      && (get_remote_thread_info (thread)->stop_reason == TARGET_STOPPED_BY_WATCHPOINT))
++      return get_remote_thread_info (thread)->watch_data_addresses;
+ 
+-  return false;
++  return {};
+ }
+ 
+ 
+@@ -16554,6 +16576,16 @@ Show the maximum size of the address (in bits) in a memory packet."), NULL,
+   add_packet_config_cmd (PACKET_accept_error_message,
+ 			 "error-message", "error-message", 0);
+ 
++  add_packet_config_cmd (PACKET_vRun_single_argument,
++			 "single-inferior-argument-feature",
++			 "single-inferior-argument-feature", 0);
++
++  add_packet_config_cmd (PACKET_qExecAndArgs, "qExecAndArgs",
++			 "fetch-exec-and-args", 0);
++
++  add_packet_config_cmd (PACKET_multi_wp_addr,
++			 "multi-wp-addr", "multiple-watchpoint-addresses", 0);
++
+   /* Assert that we've registered "set remote foo-packet" commands
+      for all packet configs.  */
+   {
+diff --git a/gdb/target-debug.h b/gdb/target-debug.h
+--- a/gdb/target-debug.h
++++ b/gdb/target-debug.h
+@@ -186,6 +186,10 @@ static std::string
+ target_debug_print_std_vector_mem_region (const std::vector<mem_region> &vec)
+ { return host_address_to_string (vec.data ()); }
+ 
++static std::string
++target_debug_print_std_vector_CORE_ADDR (const std::vector<CORE_ADDR> &vec)
++{ return host_address_to_string (vec.data ()); }
++
+ static std::string
+ target_debug_print_std_vector_static_tracepoint_marker
+   (const std::vector<static_tracepoint_marker> &vec)
+diff --git a/gdb/target-delegates-gen.c b/gdb/target-delegates-gen.c
+--- a/gdb/target-delegates-gen.c
++++ b/gdb/target-delegates-gen.c
+@@ -56,7 +56,7 @@ struct dummy_target : public target_ops
+   int remove_mask_watchpoint (CORE_ADDR arg0, CORE_ADDR arg1, enum target_hw_bp_type arg2) override;
+   bool stopped_by_watchpoint () override;
+   bool have_steppable_watchpoint () override;
+-  bool stopped_data_address (CORE_ADDR *arg0) override;
++  std::vector<CORE_ADDR> stopped_data_addresses () override;
+   bool watchpoint_addr_within_range (CORE_ADDR arg0, CORE_ADDR arg1, int arg2) override;
+   int region_ok_for_hw_watchpoint (CORE_ADDR arg0, int arg1) override;
+   bool can_accel_watchpoint_condition (CORE_ADDR arg0, int arg1, int arg2, struct expression *arg3) override;
+@@ -237,7 +237,7 @@ struct debug_target : public target_ops
+   int remove_mask_watchpoint (CORE_ADDR arg0, CORE_ADDR arg1, enum target_hw_bp_type arg2) override;
+   bool stopped_by_watchpoint () override;
+   bool have_steppable_watchpoint () override;
+-  bool stopped_data_address (CORE_ADDR *arg0) override;
++  std::vector<CORE_ADDR> stopped_data_addresses () override;
+   bool watchpoint_addr_within_range (CORE_ADDR arg0, CORE_ADDR arg1, int arg2) override;
+   int region_ok_for_hw_watchpoint (CORE_ADDR arg0, int arg1) override;
+   bool can_accel_watchpoint_condition (CORE_ADDR arg0, int arg1, int arg2, struct expression *arg3) override;
+@@ -1020,28 +1020,27 @@ debug_target::have_steppable_watchpoint ()
+   return result;
+ }
+ 
+-bool
+-target_ops::stopped_data_address (CORE_ADDR *arg0)
++std::vector<CORE_ADDR>
++target_ops::stopped_data_addresses ()
+ {
+-  return this->beneath ()->stopped_data_address (arg0);
++  return this->beneath ()->stopped_data_addresses ();
+ }
+ 
+-bool
+-dummy_target::stopped_data_address (CORE_ADDR *arg0)
++std::vector<CORE_ADDR>
++dummy_target::stopped_data_addresses ()
+ {
+-  return false;
++  return std::vector<CORE_ADDR> ();
+ }
+ 
+-bool
+-debug_target::stopped_data_address (CORE_ADDR *arg0)
++std::vector<CORE_ADDR>
++debug_target::stopped_data_addresses ()
+ {
+-  target_debug_printf_nofunc ("-> %s->stopped_data_address (...)", this->beneath ()->shortname ());
+-  bool result
+-    = this->beneath ()->stopped_data_address (arg0);
+-  target_debug_printf_nofunc ("<- %s->stopped_data_address (%s) = %s",
++  target_debug_printf_nofunc ("-> %s->stopped_data_addresses (...)", this->beneath ()->shortname ());
++  std::vector<CORE_ADDR> result
++    = this->beneath ()->stopped_data_addresses ();
++  target_debug_printf_nofunc ("<- %s->stopped_data_addresses () = %s",
+ 	      this->beneath ()->shortname (),
+-	      target_debug_print_CORE_ADDR_p (arg0).c_str (),
+-	      target_debug_print_bool (result).c_str ());
++	      target_debug_print_std_vector_CORE_ADDR (result).c_str ());
+   return result;
+ }
+ 
+diff --git a/gdb/target.h b/gdb/target.h
+--- a/gdb/target.h
++++ b/gdb/target.h
+@@ -601,8 +601,8 @@ struct target_ops
+       TARGET_DEFAULT_RETURN (false);
+     virtual bool have_steppable_watchpoint ()
+       TARGET_DEFAULT_RETURN (false);
+-    virtual bool stopped_data_address (CORE_ADDR *)
+-      TARGET_DEFAULT_RETURN (false);
++    virtual std::vector<CORE_ADDR> stopped_data_addresses ()
++      TARGET_DEFAULT_RETURN (std::vector<CORE_ADDR> ());
+     virtual bool watchpoint_addr_within_range (CORE_ADDR, CORE_ADDR, int)
+       TARGET_DEFAULT_FUNC (default_watchpoint_addr_within_range);
+ 
+@@ -2169,11 +2169,22 @@ extern int target_remove_hw_breakpoint (gdbarch *gdbarch,
+ 
+ extern int target_ranged_break_num_registers (void);
+ 
+-/* Return non-zero if target knows the data address which triggered this
+-   target_stopped_by_watchpoint, in such case place it to *ADDR_P.  Only the
+-   INFERIOR_PTID task is being queried.  */
+-#define target_stopped_data_address(target, addr_p) \
+-  (target)->stopped_data_address (addr_p)
++/* Return a vector containing the data addresses which triggered this
++   target_stopped_by_watchpoint if the addresses are known.  If the
++   addresses are not known then an empty vector is returned.  Only the
++   INFERIOR_PTID task is being queried.
++
++   Some targets, for example AArch64, have imprecise reporting of
++   watchpoint event addresses.  As a result, many watchpoints could account
++   for a single watchpoint event.  In such a case, this method will return
++   the address of all possible watchpoints, and it is up to GDB core to
++   select a suitable watchpoint to display to the user, for example, by
++   checking the value of write watchpoints.  Or GDB core could tell the
++   user that it is unable to disambiguate between multiple read watchpoints
++   (though this isn't currently done).  */
++
++#define target_stopped_data_addresses(target) \
++  (target)->stopped_data_addresses ()
+ 
+ /* Return non-zero if ADDR is within the range of a watchpoint spanning
+    LENGTH bytes beginning at START.  */
+diff --git a/gdb/testsuite/gdb.base/watchpoint-adjacent.c b/gdb/testsuite/gdb.base/watchpoint-adjacent.c
+new file mode 100644
+--- /dev/null
++++ b/gdb/testsuite/gdb.base/watchpoint-adjacent.c
+@@ -0,0 +1,72 @@
++/* This testcase is part of GDB, the GNU debugger.
++
++   Copyright 2025 Free Software Foundation, Inc.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++#include <stdint.h>
++#include <assert.h>
++
++typedef unsigned long long type_ll;
++
++#ifndef VAR_TYPE
++#  error "VAR_TYPE not defined"
++#endif
++
++/* Place A and B within this wrapper struct.  FIRST ensures that A is
++   (usually) going to start at an 8-byte boundary.  The goal here is
++   that, when VAR_TYPE is less than 8 bytes, both A and B are placed
++   within the same 8-byte region, and that the region starts at an
++   8-byte boundary.  */
++
++struct wrapper
++{
++  unsigned long long first;
++
++  VAR_TYPE a, b;
++};
++
++volatile struct wrapper obj;
++
++/* Write to obj.a and obj.b, but don't read these fields.  */
++void
++writer (void)
++{
++  obj.a = 1;
++  obj.b = 2;
++}
++
++/* Read from obj.a and obj.b, but don't write to these fields.  */
++int
++reader (void)
++{
++  int v = obj.b - obj.a;
++  v--;
++  return v;
++}
++
++int
++main (void)
++{
++  /* Ensure that obj.a, obj.b, and obj.c were placed as we needed.  */
++  assert ((((uintptr_t) &obj.a) & 0x7) == 0);
++  assert ((((uintptr_t) &obj.a) + sizeof (obj.a)) == (((uintptr_t) &obj.b)));
++  assert (sizeof (obj.a) == sizeof (obj.b));
++
++  writer ();
++
++  int val = reader ();	/* Break for read test.  */
++
++  return val;
++}
+diff --git a/gdb/testsuite/gdb.base/watchpoint-adjacent.exp b/gdb/testsuite/gdb.base/watchpoint-adjacent.exp
+new file mode 100644
+--- /dev/null
++++ b/gdb/testsuite/gdb.base/watchpoint-adjacent.exp
+@@ -0,0 +1,182 @@
++# Copyright 2025 Free Software Foundation, Inc.
++#
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++# The inferior has two adjacent variables.  We add a 'watch' on one
++# field, and an 'rwatch' on the other.  Running the inferior writes to
++# both fields.  Check GDB reports the expected 'watch' watchpoint.
++#
++# Multiple inferiors are compiled, using a variety of types for the
++# two fields.
++
++require allow_hw_watchpoint_multi_tests
++
++standard_testfile
++
++# When printing a value, for some variable types, GDB will add a
++# suffix containing an alternative representation of the value.  For
++# example, characters will be printed as decimal, and then as the
++# character.
++#
++# Return a regexp to match the suffix for a variable of VAR_TYPE.
++# This doesn't match the specific value contents, it will match all
++# possible suffix values for something of VAR_TYPE.
++proc get_value_suffix { var_type } {
++    if { $var_type eq "char" } {
++	set suffix " '\[^'\]+'"
++    } else {
++	set suffix ""
++    }
++
++    return $suffix
++}
++
++# Start FILENAME, then set a watch and rwatch watchpoint on WATCH_VAR
++# and RWATCH_VAR respectively.  Continue the inferior and expect to
++# see GDB stop due to WATCH_VAR being written too.
++proc run_write_test { filename var_type watch_var rwatch_var } {
++    clean_restart $filename
++
++    if { ![runto_main] } {
++	return
++    }
++
++    delete_breakpoints
++
++    gdb_test_no_output "set breakpoint always-inserted on"
++
++    gdb_test "watch obj.$watch_var" \
++	"Hardware watchpoint $::decimal: obj.$watch_var"
++    set wp_num [get_integer_valueof "\$bpnum" "*UNKNOWN*"]
++    gdb_test "rwatch obj.$rwatch_var" \
++	"Hardware read watchpoint $::decimal: obj.$rwatch_var"
++
++    if { $watch_var eq "a" } {
++	set new_val 1
++    } else {
++	set new_val 2
++    }
++
++    set suffix [get_value_suffix $var_type]
++
++    gdb_test "continue" \
++	[multi_line \
++	     "Hardware watchpoint $wp_num: obj.$watch_var" \
++	     "" \
++	     "Old value = 0${suffix}" \
++	     "New value = ${new_val}${suffix}" \
++	     ".*"]
++
++}
++
++# Start FILENAME, continue until the call to the `reader` function in
++# the inferior.  Then create an 'rwatch' watchpoint on RWATCH var,
++# which will be either 'a' or 'b'.  Next create 'watch' watchpoints on
++# both the 'a' and 'b' variables, watching for writes.
++#
++# Continue the inferior, both 'a' and 'b' are read, and GDB should stop
++# and let us know that we stopped at the 'rwatch' watchpoint.
++#
++# On some architectures, for some variable sizes, the hardware cannot
++# figure out which watchpoint triggered as the hardware might have
++# imprecise reporting of watchpoint event addresses.  In this case the
++# backend code will report the address of all possible watchpoints to
++# core GDB.  Core GDB will test the 'watch' watchpoints to see if the
++# value has changed, and if none have, GDB will report the first
++# 'rwatch' watchpoint, assuming that this might be the watchpoint that
++# triggered the stop.
++proc run_read_test { filename var_type rwatch_var rwatch_first watch_vars } {
++    clean_restart $filename
++
++    if { ![runto_main] } {
++	return
++    }
++
++    gdb_breakpoint [gdb_get_line_number "Break for read test"]
++    gdb_continue_to_breakpoint "prepare for read test"
++    delete_breakpoints
++
++    gdb_test_no_output "set breakpoint always-inserted on"
++
++    if { $rwatch_first } {
++	gdb_test "rwatch obj.${rwatch_var}" \
++	    "Hardware read watchpoint $::decimal: obj.$rwatch_var"
++	set wp_num [get_integer_valueof "\$bpnum" "*UNKNOWN*"]
++    }
++
++    foreach v $watch_vars {
++	gdb_test "watch obj.$v" \
++	    "Hardware watchpoint $::decimal: obj.$v"
++    }
++
++    if { !$rwatch_first } {
++	gdb_test "rwatch obj.${rwatch_var}" \
++	    "Hardware read watchpoint $::decimal: obj.$rwatch_var"
++	set wp_num [get_integer_valueof "\$bpnum" "*UNKNOWN*"]
++    }
++
++    if { $rwatch_var eq "a" } {
++	set val 1
++    } else {
++	set val 2
++    }
++
++    set suffix [get_value_suffix $var_type]
++
++    gdb_test "continue" \
++	[multi_line \
++	     "Hardware read watchpoint ${wp_num}: obj.$rwatch_var" \
++	     "" \
++	     "Value = ${val}${suffix}" \
++	     ".*"]
++}
++
++# Build a binary using VAR_TYPE as the test variable type.  Then call
++# run_test twice.
++proc build_and_run_test { var_type } {
++    set filename ${::testfile}-${var_type}
++
++    set flags [list debug additional_flags=-DVAR_TYPE=${var_type}]
++    if {[build_executable "failed to build" $filename $::srcfile $flags]} {
++	return
++    }
++
++    set test_list [list \
++		       { a {a b} } \
++		       { b {a b} } \
++		       { a {b} } \
++		       { b {a} }]
++    foreach_with_prefix test $test_list {
++	set rwatch_var [lindex $test 0]
++	set watch_vars [lindex $test 1]
++
++	foreach_with_prefix rwatch_first { true false } {
++	    run_read_test $filename $var_type $rwatch_var $rwatch_first $watch_vars
++	}
++    }
++
++    foreach test { {a b} {b a} } {
++	set watch_var [lindex $test 0]
++	set rwatch_var [lindex $test 1]
++
++	with_test_prefix "watch: ${watch_var}, rwatch: ${rwatch_var}" {
++	    run_write_test $filename $var_type $watch_var $rwatch_var
++	}
++    }
++}
++
++# Run the test with a series of different types.
++foreach_with_prefix var_type { type_ll int short char float double } {
++    build_and_run_test $var_type
++}
+diff --git a/gdb/x86-linux-nat.h b/gdb/x86-linux-nat.h
+--- a/gdb/x86-linux-nat.h
++++ b/gdb/x86-linux-nat.h
+@@ -52,14 +52,14 @@ struct x86_linux_nat_target : public x86_nat_target<linux_nat_target>
+   bool stopped_by_watchpoint () override
+   { return linux_nat_target::stopped_by_watchpoint (); }
+ 
+-  bool stopped_data_address (CORE_ADDR *addr_p) override
+-  { return linux_nat_target::stopped_data_address (addr_p); }
++  std::vector<CORE_ADDR> stopped_data_addresses () override
++  { return linux_nat_target::stopped_data_addresses (); }
+ 
+   bool low_stopped_by_watchpoint () override
+   { return x86_nat_target::stopped_by_watchpoint (); }
+ 
+   bool low_stopped_data_address (CORE_ADDR *addr_p) override
+-  { return x86_nat_target::stopped_data_address (addr_p); }
++  { return x86_stopped_data_address (addr_p); }
+ 
+   void low_new_fork (struct lwp_info *parent, pid_t child_pid) override;
+ 
+diff --git a/gdb/x86-nat.h b/gdb/x86-nat.h
+--- a/gdb/x86-nat.h
++++ b/gdb/x86-nat.h
+@@ -104,8 +104,14 @@ struct x86_nat_target : public BaseTarget
+   bool stopped_by_watchpoint () override
+   { return x86_stopped_by_watchpoint (); }
+ 
+-  bool stopped_data_address (CORE_ADDR *addr_p) override
+-  { return x86_stopped_data_address (addr_p); }
++  std::vector<CORE_ADDR> stopped_data_addresses () override
++  {
++    CORE_ADDR addr;
++    if (x86_stopped_data_address (&addr))
++      return { addr };
++
++    return {};
++  }
+ 
+   /* A target must provide an implementation of the
+      "supports_stopped_by_hw_breakpoint" target method before this
+diff --git a/gdbserver/linux-aarch64-low.cc b/gdbserver/linux-aarch64-low.cc
+--- a/gdbserver/linux-aarch64-low.cc
++++ b/gdbserver/linux-aarch64-low.cc
+@@ -120,7 +120,7 @@ protected:
+ 
+   bool low_stopped_by_watchpoint () override;
+ 
+-  CORE_ADDR low_stopped_data_address () override;
++  std::vector<CORE_ADDR> low_stopped_data_addresses () override;
+ 
+   bool low_siginfo_fixup (siginfo_t *native, gdb_byte *inf,
+ 			  int direction) override;
+@@ -585,10 +585,10 @@ aarch64_remove_non_address_bits (CORE_ADDR pointer)
+   return aarch64_remove_top_bits (pointer, mask);
+ }
+ 
+-/* Implementation of linux target ops method "low_stopped_data_address".  */
++/* Implementation of linux target ops method "low_stopped_data_addresses".  */
+ 
+-CORE_ADDR
+-aarch64_target::low_stopped_data_address ()
++std::vector<CORE_ADDR>
++aarch64_target::low_stopped_data_addresses ()
+ {
+   siginfo_t siginfo;
+   struct aarch64_debug_reg_state *state;
+@@ -596,12 +596,12 @@ aarch64_target::low_stopped_data_address ()
+ 
+   /* Get the siginfo.  */
+   if (ptrace (PTRACE_GETSIGINFO, pid, NULL, &siginfo) != 0)
+-    return (CORE_ADDR) 0;
++    return {};
+ 
+   /* Need to be a hardware breakpoint/watchpoint trap.  */
+   if (siginfo.si_signo != SIGTRAP
+       || (siginfo.si_code & 0xffff) != 0x0004 /* TRAP_HWBKPT */)
+-    return (CORE_ADDR) 0;
++    return {};
+ 
+   /* Make sure to ignore the top byte, otherwise we may not recognize a
+      hardware watchpoint hit.  The stopped data addresses coming from the
+@@ -611,11 +611,7 @@ aarch64_target::low_stopped_data_address ()
+ 
+   /* Check if the address matches any watched address.  */
+   state = aarch64_get_debug_reg_state (current_thread->id.pid ());
+-  CORE_ADDR result;
+-  if (aarch64_stopped_data_address (state, addr_trap, &result))
+-    return result;
+-
+-  return (CORE_ADDR) 0;
++  return aarch64_stopped_data_addresses (state, addr_trap);
+ }
+ 
+ /* Implementation of linux target ops method "low_stopped_by_watchpoint".  */
+@@ -623,7 +619,7 @@ aarch64_target::low_stopped_data_address ()
+ bool
+ aarch64_target::low_stopped_by_watchpoint ()
+ {
+-  return (low_stopped_data_address () != 0);
++  return !low_stopped_data_addresses ().empty ();
+ }
+ 
+ /* Fetch the thread-local storage pointer for libthread_db.  */
+diff --git a/gdbserver/linux-arm-low.cc b/gdbserver/linux-arm-low.cc
+--- a/gdbserver/linux-arm-low.cc
++++ b/gdbserver/linux-arm-low.cc
+@@ -100,7 +100,7 @@ protected:
+ 
+   bool low_stopped_by_watchpoint () override;
+ 
+-  CORE_ADDR low_stopped_data_address () override;
++  std::vector<CORE_ADDR> low_stopped_data_addresses () override;
+ 
+   arch_process_info *low_new_process () override;
+ 
+@@ -729,11 +729,11 @@ arm_target::low_stopped_by_watchpoint ()
+ 
+ /* Return data address that triggered watchpoint.  Called only if
+    low_stopped_by_watchpoint returned true.  */
+-CORE_ADDR
+-arm_target::low_stopped_data_address ()
++std::vector<CORE_ADDR>
++arm_target::low_stopped_data_addresses ()
+ {
+   struct lwp_info *lwp = get_thread_lwp (current_thread);
+-  return lwp->arch_private->stopped_data_address;
++  return { lwp->arch_private->stopped_data_address };
+ }
+ 
+ /* Called when a new process is created.  */
+diff --git a/gdbserver/linux-loongarch-low.cc b/gdbserver/linux-loongarch-low.cc
+--- a/gdbserver/linux-loongarch-low.cc
++++ b/gdbserver/linux-loongarch-low.cc
+@@ -65,7 +65,7 @@ protected:
+ 
+   bool low_stopped_by_watchpoint () override;
+ 
+-  CORE_ADDR low_stopped_data_address () override;
++  std::vector<CORE_ADDR> low_stopped_data_addresses () override;
+ 
+   arch_process_info *low_new_process () override;
+ 
+@@ -555,10 +555,10 @@ loongarch_target::low_remove_point (raw_bkpt_type type, CORE_ADDR addr,
+ }
+ 
+ 
+-/* Implementation of linux target ops method "low_stopped_data_address".  */
++/* Implementation of linux target ops method "low_stopped_data_addresses".  */
+ 
+-CORE_ADDR
+-loongarch_target::low_stopped_data_address ()
++std::vector<CORE_ADDR>
++loongarch_target::low_stopped_data_addresses ()
+ {
+   siginfo_t siginfo;
+   struct loongarch_debug_reg_state *state;
+@@ -566,20 +566,20 @@ loongarch_target::low_stopped_data_address ()
+ 
+   /* Get the siginfo.  */
+   if (ptrace (PTRACE_GETSIGINFO, pid, NULL, &siginfo) != 0)
+-    return (CORE_ADDR) 0;
++    return {};
+ 
+   /* Need to be a hardware breakpoint/watchpoint trap.  */
+   if (siginfo.si_signo != SIGTRAP
+       || (siginfo.si_code & 0xffff) != 0x0004 /* TRAP_HWBKPT */)
+-    return (CORE_ADDR) 0;
++    return {};
+ 
+   /* Check if the address matches any watched address.  */
+   state = loongarch_get_debug_reg_state (current_thread->id.pid ());
+   CORE_ADDR result;
+   if (loongarch_stopped_data_address (state, (CORE_ADDR) siginfo.si_addr, &result))
+-    return result;
++    return { result };
+ 
+-  return (CORE_ADDR) 0;
++  return {};
+ }
+ 
+ /* Implementation of linux target ops method "low_stopped_by_watchpoint".  */
+@@ -587,7 +587,7 @@ loongarch_target::low_stopped_data_address ()
+ bool
+ loongarch_target::low_stopped_by_watchpoint ()
+ {
+-  return (low_stopped_data_address () != 0);
++  return !low_stopped_data_addresses ().empty ();
+ }
+ 
+ /* Implementation of linux target ops method "low_new_process".  */
+diff --git a/gdbserver/linux-low.cc b/gdbserver/linux-low.cc
+--- a/gdbserver/linux-low.cc
++++ b/gdbserver/linux-low.cc
+@@ -2194,7 +2194,7 @@ linux_process_target::check_stopped_by_watchpoint (lwp_info *child)
+   if (low_stopped_by_watchpoint ())
+     {
+       child->stop_reason = TARGET_STOPPED_BY_WATCHPOINT;
+-      child->stopped_data_address = low_stopped_data_address ();
++      child->stopped_data_addresses = low_stopped_data_addresses ();
+     }
+ 
+   return child->stop_reason == TARGET_STOPPED_BY_WATCHPOINT;
+@@ -2206,10 +2206,10 @@ linux_process_target::low_stopped_by_watchpoint ()
+   return false;
+ }
+ 
+-CORE_ADDR
+-linux_process_target::low_stopped_data_address ()
++std::vector<CORE_ADDR>
++linux_process_target::low_stopped_data_addresses ()
+ {
+-  return 0;
++  return {};
+ }
+ 
+ /* Return the ptrace options that we want to try to enable.  */
+@@ -5663,12 +5663,12 @@ linux_process_target::stopped_by_watchpoint ()
+   return lwp->stop_reason == TARGET_STOPPED_BY_WATCHPOINT;
+ }
+ 
+-CORE_ADDR
+-linux_process_target::stopped_data_address ()
++std::vector<CORE_ADDR>
++linux_process_target::stopped_data_addresses ()
+ {
+   struct lwp_info *lwp = get_thread_lwp (current_thread);
+ 
+-  return lwp->stopped_data_address;
++  return lwp->stopped_data_addresses;
+ }
+ 
+ /* This is only used for targets that define PT_TEXT_ADDR,
+diff --git a/gdbserver/linux-low.h b/gdbserver/linux-low.h
+--- a/gdbserver/linux-low.h
++++ b/gdbserver/linux-low.h
+@@ -204,7 +204,7 @@ class linux_process_target : public process_stratum_target
+ 
+   bool stopped_by_watchpoint () override;
+ 
+-  CORE_ADDR stopped_data_address () override;
++  std::vector<CORE_ADDR> stopped_data_addresses () override;
+ 
+   bool supports_read_offsets () override;
+ 
+@@ -657,7 +657,7 @@ class linux_process_target : public process_stratum_target
+ 
+   virtual bool low_stopped_by_watchpoint ();
+ 
+-  virtual CORE_ADDR low_stopped_data_address ();
++  virtual std::vector<CORE_ADDR> low_stopped_data_addresses ();
+ 
+   /* Hooks to reformat register data for PEEKUSR/POKEUSR (in particular
+      for registers smaller than an xfer unit).  */
+@@ -863,10 +863,9 @@ struct lwp_info
+   enum target_stop_reason stop_reason = TARGET_STOPPED_BY_NO_REASON;
+ 
+   /* On architectures where it is possible to know the data address of
+-     a triggered watchpoint, STOPPED_DATA_ADDRESS is non-zero, and
+-     contains such data address.  Only valid if STOPPED_BY_WATCHPOINT
+-     is true.  */
+-  CORE_ADDR stopped_data_address = 0;
++     a triggered watchpoint, STOPPED_DATA_ADDRESS is the list of such
++     data addresses.  Only valid if STOPPED_BY_WATCHPOINT is true.  */
++  std::vector<CORE_ADDR> stopped_data_addresses;
+ 
+   /* If this is non-zero, it is a breakpoint to be reinserted at our next
+      stop (SIGTRAP stops only).  */
+diff --git a/gdbserver/linux-mips-low.cc b/gdbserver/linux-mips-low.cc
+--- a/gdbserver/linux-mips-low.cc
++++ b/gdbserver/linux-mips-low.cc
+@@ -62,7 +62,7 @@ protected:
+ 
+   bool low_stopped_by_watchpoint () override;
+ 
+-  CORE_ADDR low_stopped_data_address () override;
++  std::vector<CORE_ADDR> low_stopped_data_addresses () override;
+ 
+   void low_collect_ptrace_register (regcache *regcache, int regno,
+ 				    char *buf) override;
+@@ -658,10 +658,10 @@ mips_target::low_stopped_by_watchpoint ()
+ }
+ 
+ /* This is the implementation of linux target ops method
+-   low_stopped_data_address.  */
++   low_stopped_data_addresses.  */
+ 
+-CORE_ADDR
+-mips_target::low_stopped_data_address ()
++std::vector<CORE_ADDR>
++mips_target::low_stopped_data_addresses ()
+ {
+   struct process_info *proc = current_process ();
+   struct arch_process_info *priv = proc->priv->arch_private;
+@@ -679,7 +679,7 @@ mips_target::low_stopped_data_address ()
+ 					&priv->watch_readback,
+ 					&priv->watch_readback_valid,
+ 					0))
+-    return 0;
++    return {};
+ 
+   num_valid = mips_linux_watch_get_num_valid (&priv->watch_readback);
+ 
+@@ -711,12 +711,12 @@ mips_target::low_stopped_data_address ()
+ 	      }
+ 	    /* Check for overlap of even a single byte.  */
+ 	    if (last_byte >= t_low && addr <= t_low + t_hi)
+-	      return addr;
++	      return { addr };
+ 	  }
+       }
+ 
+   /* Shouldn't happen.  */
+-  return 0;
++  return {};
+ }
+ 
+ /* Fetch the thread-local storage pointer for libthread_db.  */
+diff --git a/gdbserver/linux-x86-low.cc b/gdbserver/linux-x86-low.cc
+--- a/gdbserver/linux-x86-low.cc
++++ b/gdbserver/linux-x86-low.cc
+@@ -158,7 +158,7 @@ protected:
+ 
+   bool low_stopped_by_watchpoint () override;
+ 
+-  CORE_ADDR low_stopped_data_address () override;
++  std::vector<CORE_ADDR> low_stopped_data_addresses () override;
+ 
+   /* collect_ptrace_register/supply_ptrace_register are not needed in the
+      native i386 case (no registers smaller than an xfer unit), and are not
+@@ -727,15 +727,15 @@ x86_target::low_stopped_by_watchpoint ()
+   return x86_dr_stopped_by_watchpoint (&proc->priv->arch_private->debug_reg_state);
+ }
+ 
+-CORE_ADDR
+-x86_target::low_stopped_data_address ()
++std::vector<CORE_ADDR>
++x86_target::low_stopped_data_addresses ()
+ {
+   struct process_info *proc = current_process ();
+   CORE_ADDR addr;
+   if (x86_dr_stopped_data_address (&proc->priv->arch_private->debug_reg_state,
+ 				   &addr))
+-    return addr;
+-  return 0;
++    return { addr };
++  return {};
+ }
+ 
+ /* Called when a new process is created.  */
+diff --git a/gdbserver/remote-utils.cc b/gdbserver/remote-utils.cc
+--- a/gdbserver/remote-utils.cc
++++ b/gdbserver/remote-utils.cc
+@@ -1195,21 +1195,42 @@ prepare_resume_reply (char *buf, ptid_t ptid, const target_waitstatus &status)
+ 
+ 	if (the_target->stopped_by_watchpoint ())
+ 	  {
+-	    CORE_ADDR addr;
+-	    int i;
+-
+-	    memcpy (buf, "watch:", 6);
+-	    buf += 6;
+-
+-	    addr = the_target->stopped_data_address ();
+-
+-	    /* Convert each byte of the address into two hexadecimal
+-	       chars.  Note that we take sizeof (void *) instead of
+-	       sizeof (addr); this is to avoid sending a 64-bit
+-	       address to a 32-bit GDB.  */
+-	    for (i = sizeof (void *) * 2; i > 0; i--)
+-	      *buf++ = tohex ((addr >> (i - 1) * 4) & 0xf);
+-	    *buf++ = ';';
++	    std::vector<CORE_ADDR> addr_vec
++	      = the_target->stopped_data_addresses ();
++
++	    /* If the debugger has not said that it can handle multiple
++	       watchpoint addresses then discard everything except the
++	       first address.
++
++	       Choosing the first address is pretty arbitrary, and might
++	       not be the best choice.  For example, if gdbserver tracked
++	       the memory contents for write watchpoints then we could
++	       check them all now to see which (if any) have changed.
++
++	       For read watchpoints there's not much we can do.  If the
++	       debugger cannot accept multiple addresses, then we'd just
++	       have to pick one (at random) and send that.
++
++	       For now though, our preference is to pass all the addresses
++	       to the debugger (when supported), and rely on it to make a
++	       smart choice.  */
++	    if (!cs.multiple_wp_addr_feature
++		&& addr_vec.size () > 1)
++	      addr_vec.erase (addr_vec.begin () + 1, addr_vec.end ());
++
++	    for (const CORE_ADDR addr : addr_vec)
++	      {
++		memcpy (buf, "watch:", 6);
++		buf += 6;
++
++		/* Convert each byte of the address into two hexadecimal
++		   chars.  Note that we take sizeof (void *) instead of
++		   sizeof (addr); this is to avoid sending a 64-bit
++		   address to a 32-bit GDB.  */
++		for (int i = sizeof (void *) * 2; i > 0; i--)
++		  *buf++ = tohex ((addr >> (i - 1) * 4) & 0xf);
++		*buf++ = ';';
++	      }
+ 	  }
+ 	else if (cs.swbreak_feature && target_stopped_by_sw_breakpoint ())
+ 	  {
+diff --git a/gdbserver/server.cc b/gdbserver/server.cc
+--- a/gdbserver/server.cc
++++ b/gdbserver/server.cc
+@@ -2745,6 +2745,10 @@ handle_query (char *own_buf, int packet_len, int *new_packet_len_p)
+ 		}
+ 	      else if (feature == "error-message+")
+ 		cs.error_message_supported = true;
++	      else if (feature == "single-inf-arg+")
++		cs.single_inferior_argument = true;
++	      else if (feature == "multi-wp-addr+")
++		cs.multiple_wp_addr_feature = true;
+ 	      else
+ 		{
+ 		  /* Move the unknown features all together.  */
+@@ -4531,6 +4535,7 @@ captured_main (int argc, char *argv[])
+       cs.vCont_supported = 0;
+       cs.memory_tagging_feature = false;
+       cs.error_message_supported = false;
++      cs.multiple_wp_addr_feature = false;
+ 
+       remote_open (port);
+ 
+diff --git a/gdbserver/server.h b/gdbserver/server.h
+--- a/gdbserver/server.h
++++ b/gdbserver/server.h
+@@ -197,6 +197,16 @@ struct client_state
+      are not supported with qRcmd and m packets, but are still supported
+      everywhere else.  This is for backward compatibility reasons.  */
+   bool error_message_supported = false;
++
++  /* If true then we've agreed that the debugger will send all inferior
++     arguments as a single string.  When false the debugger will attempt
++     to split the inferior arguments before sending them.  */
++  bool single_inferior_argument = false;
++
++  /* When true, GDB supports receiving multiple watchpoint addresses within
++     a 'T' stop reply packet.  When false, GDB only expects (at most) a
++     single watchpoint address, and gdbserver must select one.  */
++  bool multiple_wp_addr_feature = false;
+ };
+ 
+ client_state &get_client_state ();
+diff --git a/gdbserver/target.cc b/gdbserver/target.cc
+--- a/gdbserver/target.cc
++++ b/gdbserver/target.cc
+@@ -409,10 +409,10 @@ process_stratum_target::stopped_by_watchpoint ()
+   return false;
+ }
+ 
+-CORE_ADDR
+-process_stratum_target::stopped_data_address ()
++std::vector<CORE_ADDR>
++process_stratum_target::stopped_data_addresses ()
+ {
+-  return 0;
++  return {};
+ }
+ 
+ bool
+diff --git a/gdbserver/target.h b/gdbserver/target.h
+--- a/gdbserver/target.h
++++ b/gdbserver/target.h
+@@ -218,9 +218,9 @@ class process_stratum_target
+      otherwise.  */
+   virtual bool stopped_by_watchpoint ();
+ 
+-  /* Returns the address associated with the watchpoint that hit, if any;
+-     returns 0 otherwise.  */
+-  virtual CORE_ADDR stopped_data_address ();
++  /* Returns the list of addresses associated with the watchpoint(s)
++     that were hit, if any; returns an empty vector otherwise.  */
++  virtual std::vector<CORE_ADDR> stopped_data_addresses ();
+ 
+   /* Return true if the read_offsets target op is supported.  */
+   virtual bool supports_read_offsets ();
+diff --git a/gdbserver/win32-low.cc b/gdbserver/win32-low.cc
+--- a/gdbserver/win32-low.cc
++++ b/gdbserver/win32-low.cc
+@@ -240,13 +240,13 @@ win32_process_target::stopped_by_watchpoint ()
+     return false;
+ }
+ 
+-CORE_ADDR
+-win32_process_target::stopped_data_address ()
++std::vector<CORE_ADDR>
++win32_process_target::stopped_data_addresses ()
+ {
+   if (the_low_target.stopped_data_address != NULL)
+-    return the_low_target.stopped_data_address ();
++    return { the_low_target.stopped_data_address () };
+   else
+-    return 0;
++    return {};
+ }
+ 
+ 
+diff --git a/gdbserver/win32-low.h b/gdbserver/win32-low.h
+--- a/gdbserver/win32-low.h
++++ b/gdbserver/win32-low.h
+@@ -144,7 +144,7 @@ class win32_process_target : public process_stratum_target
+ 
+   bool stopped_by_watchpoint () override;
+ 
+-  CORE_ADDR stopped_data_address () override;
++  std::vector<CORE_ADDR> stopped_data_addresses () override;
+ 
+   bool supports_qxfer_siginfo () override;
+ 

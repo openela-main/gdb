@@ -41,11 +41,11 @@ Name: %{?scl_prefix}gdb
 # See timestamp of source gnulib installed into gnulib/ .
 %global snapgnulib 20220501
 %global tarname gdb-%{version}
-Version: 16.3
+Version: 17.2
 
 # The release always contains a leading reserved number, start it at 1.
 # `upstream' is not a part of `name' to stay fully rpm dependencies compatible for the testing.
-Release: 3.1%{?dist}
+Release: 4%{?dist}
 
 License: GPL-3.0-or-later AND BSD-3-Clause AND FSFAP AND LGPL-2.1-or-later AND GPL-2.0-or-later AND LGPL-2.0-or-later AND LicenseRef-Fedora-Public-Domain AND GFDL-1.3-or-later AND LGPL-2.0-or-later WITH GCC-exception-2.0 AND GPL-3.0-or-later WITH GCC-exception-3.1 AND GPL-2.0-or-later WITH GNU-compiler-exception AND MIT
 # Do not provide URL for snapshots as the file lasts there only for 2 days.
@@ -135,10 +135,6 @@ BuildRequires: gcc-c++
 #=push+jan
 Source2: gdb-orphanripper.c
 
-# Man page for gstack(1).
-#=push+jan
-Source3: gdb-gstack.man
-
 # /etc/gdbinit (from Debian but with Fedora compliant location).
 #=fedora
 Source4: gdbinit
@@ -146,7 +142,6 @@ Source4: gdbinit
 # Include the auto-generated file containing the "Patch:" directives.
 # See README.local-patches for more details.
 Source9998: _gdb.spec.Patch.include
-Source9999: _gdb.spec.patch.include
 %include %{SOURCE9998}
 
 BuildRequires: readline-devel%{buildisa} >= 7.0
@@ -222,11 +217,6 @@ BuildRequires: %{?scl_testing_prefix}gcc %{?scl_testing_prefix}gcc-c++ %{?scl_te
 # Fedora supports Objective C.
 %if 0%{!?rhel:1}
 BuildRequires: gcc-objc
-%endif
-
-# We don't support gcc-gdb-plugin on RHEL anymore.
-%if 0%{!?rhel:1}
-BuildRequires: gcc-gdb-plugin%{?_isa}
 %endif
 
 BuildRequires: systemtap-sdt-devel
@@ -313,7 +303,7 @@ machine than the one which is running the program being debugged.
 
 %package doc
 Summary: Documentation for GDB (the GNU source-level debugger)
-License: GFDL
+License: GFDL-1.3-or-later
 BuildArch: noarch
 %if 0%{?scl:1}
 # As of F-28, packages won't need to call /sbin/install-info by hand
@@ -331,7 +321,7 @@ and printing their data.
 This package provides INFO, HTML and PDF user manual for GDB.
 
 %prep
-%setup -q -n %{gdb_src}
+%autosetup -p1 -n %{gdb_src}
 
 # Files have `# <number> <file>' statements breaking VPATH / find-debuginfo.sh .
 (cd gdb;rm -fv $(perl -pe 's/\\\n/ /' <Makefile.in|sed -n 's/^YYFILES = //p'))
@@ -339,12 +329,6 @@ This package provides INFO, HTML and PDF user manual for GDB.
 # *.info* is needlessly split in the distro tar; also it would not get used as
 # we build in GDB_BUILD, just to be sure.
 find -name "*.info*"|xargs rm -f
-
-# Apply patches defined on _gdb.spec.Patch.include
-
-# Include the auto-generated patch directives.
-# See README.local-patches for more details.
-%include %{SOURCE9999}
 
 find -name "*.orig" | xargs rm -f
 ! find -name "*.rej" # Should not happen.
@@ -443,8 +427,9 @@ COMMON_GDB_CONFIGURE_FLAGS="\
         --with-lzma                                             \
         --with-debuginfod                                       \
 %if 0%{?rhel:1}
-        --disable-libctf
+        --disable-libctf                                        \
 %endif
+        --disable-gdb-compile
 "
 
 # The base set of targets that Fedora and RHEL support.  These are the
@@ -815,7 +800,6 @@ rm -rf $RPM_BUILD_ROOT/%{_libdir}/lib{bfd*,opcodes*,iberty*,ctf*,sframe*}
 
 # pstack obsoletion
 
-cp -p %{SOURCE3} $RPM_BUILD_ROOT%{_mandir}/man1/gstack.1
 ln -s gstack.1 $RPM_BUILD_ROOT%{_mandir}/man1/pstack.1
 ln -s gstack $RPM_BUILD_ROOT%{_bindir}/pstack
 
@@ -941,45 +925,197 @@ fi
 # endif scl
 
 %changelog
-* Thu Sep10 2026 Guinevere Larsen <guinevere@redhat.com> - 16.3-3.1.el10
-- Backport upstream commit 5423bf3011daea5e52c2af1d9fb70abc1d947b55
-  (Tom de Vries, RHEL-190102)
+* Sat Sep 19 2026 Keith Seitz <keiths@redhat.com> - 17.2-4.el10
+- NVR bump.
 
-* Thu Feb 19 2026 Keith Seitz <keiths@redhat.com> - 16.3-3.el10
-- Include gdb-index-generation-fixes.patch (renamed).
-  (Tom Tromey and Andrew Burgess, RHEL-150992)
+* Sun Sep  6 2026 Keith Seitz <keiths@redhat.com> - 17.2-3.1.el10
+- Backport "Fix out-of-bounds write in read_member_functions"
+  (Tom de Vries, RHEL-190101)
 
-* Mon Jun 02 2025 Guinevere Larsen <guinevere@redhat.com> - 16.3-2.el10
-- Backport fixes to decoding AMD64 instructions
-  Resolves: RHEL-93581
+* Thu Jul 30 2026 Guinevere Larsen <guinevere@redhat.com> - 17.2-3
+- Backport upstream commit b0196f0c87e13cc73039039b89b27580823dd573
+  to fix RHEL-220607.
 
-* Fri May 30 2025 Guinevere Larsen <guinevere@redhat.com> - 16.3-1.el10
-- Rebase RHEL10 GDB to 16.3
-  Resolves: RHEL-56897
-  Resolves: RHEL-91382
+* Thu Jul 30 2026 Guinevere Larsen <guinevere@redhat.com> - 17.2-2
+- Backport commit 9d3cf9efd51ebae3f45bb49e3544cb7eeb63a138 to fix
+  RHEL-159887.
+
+* Mon Jul 13 2026 Guinevere Larsen <guinevere@redhat.com> 17.2-1
+- Rebased to Fedora's GDB 17.2.
+  Resolves: RHEL-126216
+
+* Wed Jul 8 2026 Andrew Burgess <aburgess@redhat.com>
+- Backport upstream commit 93f536d813c41527 to fix RHBZ 2498034.  This
+  commit will drop out when we rebase to GDB 18.
+
+* Wed Jul 8 2026 Andrew Burgess <aburgess@redhat.com>
+- Backport upstream commit be3a9405ceb4d6d6 to fix and issue with the
+  D demangler (RHBZ 2368350).  This commit will drop out when we
+  rebase to GDB 18.
+
+* Wed Jul 8 2026 Andrew Burgess <aburgess@redhat.com>
+- Adjust commit message in gdb-backport-dap-core-file-support.patch to
+  remove '---' string which confuses git.
+
+* Wed Jun 24 2026 Michal Kolar <mkolar@redhat.com>
+- Rebase to FSF GDB 17.2.
+  Deleted: gdb-rhbz2435950-skip-revert.patch
+  Backport e492fb22b70, gdb: backport DAP core file support
+  Replace manual, multi-file patch inclusion with modern autosetup
+  Add rpminspect.yaml to define package-specific testing policy
+
+* Wed May 27 2026 Kevin Buettner <kevinb@redhat.com>
+- Applied proposed patch "[gdb/testsuite, Tcl 9] Fix EILSEQ problems for
+  UTF8 related tests".  This is required in order to complete a build
+  with testing.
+
+* Sat May 16 2026 Andrew Burgess <aburgess@redhat.com>
+- Backport the following upstream commits in order to address RHBZ
+  2467251: d980317c7f1, 958d06262a7, 7d1d7386561, 8915de0883c,
+  8f65ab7b71f.  These commits will all drop out when we rebase to GDB
+  18.
+
+* Tue May 5 2026 Keith Seitz <keiths@redhat.com>
+- Backport upstream commit ef7727ae from Tom de Vries to
+  fix the test suite for newer Tcl releases.
+
+* Tue Apr 21 2026 Andrew Burgess <aburgess@redhat.com>
+- Backport upstream commits 8bd08ee92c4 and cd289df068e to address
+  rhbz2366461.  These backports will not be needed once we rebase to
+  GDB 18.
+
+* Wed Feb 25 2026 Kevin Buettner <kevinb@redhat.com>
+- Backport upstream commit c1da013915e from Kevin Buettner to fix
+  gcore failures caused by glibc 2.42 guard page changes (RHBZ 2413405).
+- Backport upstream commit d2cc16cd7fc from Jan Vrany to fix
+  FAILs in gdb.base/fileio.exp caused by macro expansion of
+  path components in OUTDIR.
+
+* Mon Feb 16 2026 Guinevere Larsen <guinevere@redhat.com>
+- Backport upstream commit f08ffbbf269 to fix RHBZ 2435950
+  This reverts a new feature that was never properly approved
+  for merging in upstream GDB.
+
+* Wed Feb 4 2026 Andrew Burgess <aburgess@redhat.com>
+- Backport upstream commit 70b66cf338b14336 to fix RH BZ 2402580.
+  This backport will not be needed once we rebase to GDB 18.
+
+* Tue Feb 3 2026 Kevin Buettner <kevinb@redhat.com>
+- Remove gcc-gdb-plugin BuildRequires and build with --disable-gdb-compile
+  due to this feature's brokenness. Tests using this feature skip cleanly
+  without timeouts.  Reduces binary size and attack surface.
+
+* Fri Jan 16 2026 Fedora Release Engineering <releng@fedoraproject.org>
+- Rebuilt for https://fedoraproject.org/wiki/Fedora_44_Mass_Rebuild
+
+* Thu Jan 8 2026 Kevin Buettner <kevinb@redhat.com> - 17.1-1
+- Rebase to FSF GDB 17.1.
+  Deleted: gdb-fix-bg-execution-repeat.patch
+  Backport 919ba8ce158e, "bfd: fix build with C23", from Guinevere Larsen,
+  fixing RH BZ 2424325.
+  Backport "Fix some more C23 const-correctness issues", from Keith Seitz,
+  fixing same class of problem described by RH BZ 2424325.
+  Backport 777079c67c81, "[gdb/build, c++20] Fix deprecated implicit
+  capture in cooked_index::set_contents", from Tom de Vries, fixing more
+  FTBS problems.
+
+* Fri Sep 19 2025 Python Maint <python-maint@redhat.com>
+- Rebuilt for Python 3.14.0rc3 bytecode
+
+* Fri Aug 15 2025 Python Maint <python-maint@redhat.com>
+- Rebuilt for Python 3.14.0rc2 bytecode
+
+* Wed Jul 23 2025 Fedora Release Engineering <releng@fedoraproject.org>
+- Rebuilt for https://fedoraproject.org/wiki/Fedora_43_Mass_Rebuild
+
+* Tue Jun 03 2025 Andrew Burgess <aburgess@redhat.com>
+- Rename 'gdb-add-rpm-suggestion-script.patch' to
+  'gdb-rpm-suggestion-script.patch' and
+  'gdb-6.3-rh-testversion-20041202.patch' to
+  'gdb-test-show-version.patch'.  The new names better reflect the
+  patch contents.
+
+* Tue Jun 03 2025 Andrew Burgess <aburgess@redhat.com>
+- Remove gdb-archer-next-over-throw-cxx-exec.patch, we now have
+  upstream commit d462550c91c.
+
+* Tue Jun 03 2025 Andrew Burgess <aburgess@redhat.com>
+- Remove gdb-6.3-mapping-zero-inode-test.patch, we now have upstream
+  commit fcfd8a4f239.
+
+* Tue Jun 03 2025 Python Maint <python-maint@redhat.com>
+- Rebuilt for Python 3.14
+
+* Mon Jun 02 2025 Python Maint <python-maint@redhat.com> - 16.3-2
+- Bootstrap for Python 3.14
 
 * Wed May 28 2025 Andrew Burgess <aburgess@redhat.com>
 - Remove 32-bit ARM support for RHEL 10+.  This is not a RHEL
   supported target, so lets drop this target.  Retain for older RHEL
   versions, as well as Fedora.
 
-* Tue May 13 2025 Alexandra Hájková <ahajkova@redhat.com> - 16.3-1
+* Mon May 12 2025 Keith Seitz <keiths@redhat.com>
+- Remove gdb-rhbz1149205-catch-syscall-after-fork-test.patch
+  in favor of upstream commit.
+
+* Wed May 07 2025 Andrew Burgess <aburgess@redhat.com>
+- Remove gdb-6.8-bz466901-backtrace-full-prelinked.patch.  Prelinking
+  is no longer supported, there seems little point keeping this test.
+
+* Fri Apr 25 2025 Alexandra Hájková <ahajkova@redhat.com>
+- Backport "Fix another timeout in gdb.base/bg-execution-repeat.exp"
+  (Tom de Vries)
+
+* Wed Apr 23 2025 Alexandra Hájková <ahajkova@redhat.com> - 16.3-1
 - Rebase to FSF GDB 16.3.
-  Deleted: gdb-rhbz2354997-gstack-drop-readnever.patch
+  Deleted: core-target-open-segfault.patch
+           gdb-rhbz2354997-gstack-drop-readnever.patch
+           tui-wrefresh-issue.patch
+
+* Wed Apr 02 2025 Alexandra Hájková <ahajkova@redhat.com>
+- Remove upstreamed gdb-rhbz-818343-set-solib-absolute-prefix-testcase.patch.
 
 * Fri Mar 28 2025 Keith Seitz <keiths@redhat.com> - 16.2-3
 - Backport "Fix gstack issues" from upstream.
   (Keith Seitz, RH BZ 2354997)
 
-* Thu Feb 13 2025 Alexandra Hájková <ahajkova@redhat.com> - 16.2-2
-- Bump the release number.
+* Thu Mar 06 2025 Kevin Buettner <kevinb@redhat.com>
+- Remove gdb-rhbz1084404-ppc64-s390x-wrong-prologue-skip-O2-g-3of3.patch.
+  The upstream test 'gdb.arch/amd64-prologue-skip.exp' should be
+  sufficient for testing an upstream fix which was pushed in 2015.
 
-* Tue Feb 11 2025 Alexandra Hájková <ahajkova@redhat.com> - 16.2-1
+* Wed Mar 05 2025 Guinevere Larsen <guinevere@redhat.com>
+- Remove gdb-6.5-gcore-buffer-limit-test.patch. A similar test has been
+  added upstream, which will trickle down soon.
+
+* Thu Feb 27 2025 Keith Seitz <keiths@redhat.com>
+- Remove gdb-6.6-bz237572-ppc-atomic-sequence-test.patch. This is covered
+  by gdb.arch/ppc64-isa207-atomic-inst.exp.
+
+* Mon Feb 10 2025 Andrew Burgess <aburgess@redhat.com>
+- Add core-target-open-segfault.patch and tui-wrefresh-issue.patch,
+  these backport upstream commits 2fc56106422 and 2b646bb8767
+  respectively, both fix regressiosn in GDB 16 vs GDB 15.
+
+* Fri Feb 07 2025 Andrew Burgess <aburgess@redhat.com>
+- Remove gdb-6.5-bz218379-ppc-solib-trampoline-test.patch.  There must
+  be upstream tests that 'next' over a libc call.  Additionally, it is
+  not clear to me exactly what bug is being tested for here.
+
+* Fri Feb 07 2025 Andrew Burgess <aburgess@redhat.com>
+- Remove gdb-gstack.man file.  This is no longer used.  There is an
+  upstream version of gstack which provides its own man page.
+
+* Tue Feb 04 2025 Alexandra Hájková <ahajkova@redhat.com> - 16.2-1
 - Rebase to FSF GDB 16.2.
-  Dropped:  gdb-backport-buildid-related-changes.patch
-            gdb-catchpoint-re-set.patch
-            gdb-remove-qnx-neutrino-support.patch
   Modified: gdb-add-rpm-suggestion-script.patch
+
+* Thu Jan 23 2025 Alexandra Hájková <ahajkova@redhat.com> - 16.1-1
+- Rebase to FSF GDB 16.1.
+  Dropped:
+  gdb-backport-buildid-related-changes.patch
+  gdb-catchpoint-re-set.patch
+  gdb-remove-qnx-neutrino-support.patch
 
 * Thu Jan 23 2025 Alexandra Hájková <ahajkova@redhat.com>
 - Remove upstreamed gdb-6.3-gstack-20050411.patch.
