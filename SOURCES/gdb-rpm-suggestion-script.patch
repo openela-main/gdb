@@ -1,7 +1,7 @@
 From FEDORA_PATCHES Mon Sep 17 00:00:00 2001
 From: Andrew Burgess <aburgess@redhat.com>
 Date: Thu, 7 Mar 2024 15:14:23 +0000
-Subject: gdb-add-rpm-suggestion-script.patch
+Subject: gdb-rpm-suggestion-script.patch
 
 ;; Not a backport.  Add a new script which hooks into GDB and suggests
 ;; RPMs to install when GDB finds an objfile with no debug info.
@@ -33,7 +33,7 @@ diff --git a/gdb/doc/gdb.texinfo b/gdb/doc/gdb.texinfo
  * Man Pages::                   Manual pages
  * Copying::                     GNU General Public License says
                                  how you can copy and share @value{GDBN}
-@@ -50588,6 +50589,111 @@ Show the current verbosity setting.
+@@ -50986,6 +50987,111 @@ Show the current verbosity setting.
  
  @end table
  
@@ -149,7 +149,7 @@ diff --git a/gdb/python/lib/gdb/command/rpm-suggestions.py b/gdb/python/lib/gdb/
 new file mode 100644
 --- /dev/null
 +++ b/gdb/python/lib/gdb/command/rpm-suggestions.py
-@@ -0,0 +1,525 @@
+@@ -0,0 +1,527 @@
 +# Copyright 2023 Free Software Foundation, Inc.
 +
 +# This program is free software; you can redistribute it and/or modify
@@ -655,7 +655,9 @@ new file mode 100644
 +
 +# The 'info rpm-suggestions' command.
 +class rpm_suggestion_info(gdb.Command):
-+    """Relist any RPM installation suggestions that have been made
++    """Relist RPM suggestions.
++
++    Relist any RPM installation suggestions that have been made
 +    since the executable was last changed."""
 +    def __init__(self):
 +        super().__init__("info rpm-suggestions", gdb.COMMAND_NONE, gdb.COMPLETE_NONE)
@@ -967,7 +969,7 @@ diff --git a/gdb/testsuite/lib/gdb.exp b/gdb/testsuite/lib/gdb.exp
  
      # If DEBUGINFOD_URLS is set, gdb will try to download sources and
      # debug info for f.i. system libraries.  Prevent this.
-@@ -2610,6 +2611,18 @@ proc default_gdb_start { } {
+@@ -2850,6 +2851,18 @@ proc default_gdb_start { } {
  	}
      }
  

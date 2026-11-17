@@ -1,7 +1,7 @@
 From FEDORA_PATCHES Mon Sep 17 00:00:00 2001
 From: Andrew Burgess <aburgess@redhat.com>
 Date: Fri, 27 Oct 2017 21:07:50 +0200
-Subject: gdb-6.3-rh-testversion-20041202.patch
+Subject: gdb-test-show-version.patch
 
 ;; Check distro name is included in the version output.
 
